@@ -1,0 +1,8 @@
+{
+  "name": "sideagents-panel",
+  "version": "0.10.3",
+  "description": "在输入框上方显示 sideagent 正在干什么；点开看详情、直接打字给它",
+  "author": {
+    "name": "ham"
+  }
+}

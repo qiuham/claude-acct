@@ -1,0 +1,13 @@
+{
+  "name": "mods",
+  "owner": {
+    "name": "ham"
+  },
+  "plugins": [
+    {
+      "name": "sideagents-panel",
+      "source": "./mods/sideagents-panel",
+      "description": "在输入框上方显示 sideagent 正在干什么"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "description": "cca 对端进度面板",
+  "modules": ["./register.js"]
+}

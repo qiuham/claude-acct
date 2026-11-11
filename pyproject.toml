@@ -1,0 +1,39 @@
+[project]
+name = "claude-acct"
+version = "0.1.0"
+description = "管理多个 Claude Code 配置目录（profile）"
+requires-python = ">=3.11"
+dependencies = [
+    "rich==15.0.0",
+    "questionary==2.1.0",
+    # questionary 2.1.0 在 prompt_toolkit 3.0.52 起会报 VSplit 没有 content，钉在 3.0.51
+    "prompt_toolkit==3.0.51",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+# 和 claude-sandbox 同一套标准：全开，只关整类不适用的
+select = ["ALL"]
+ignore = [
+    "D",        # 缺文档字符串
+    "ANN",      # 缺类型标注（另起一轮）
+    "CPY",      # 版权头
+    "PT",       # pytest 写法：本项目用 unittest
+    "RUF001", "RUF002", "RUF003",  # 中文标点被判为歧义 Unicode
+    "COM812",   # 尾逗号，交给格式化器
+    "E501",     # 行宽交给格式化器
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.per-file-ignores]
+# INP001：测试是单文件 unittest 模块（`python3 -m unittest discover -s tests` 直接用），
+# 不当包导入；给它加 `tests/__init__.py` 反而会让 discover 按包名去找模块。
+"tests/*" = ["ARG", "B011", "INP001", "SIM117", "S101", "S603", "S607"]
+# sideagent_*.py 是从 sideagent.py 拆出来的同一个模块的几部分，互相用对方的内部函数（core._x）
+"src/cca/session/sideagent_*.py" = ["SLF001"]

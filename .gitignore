@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# 插件加载时自动生成
+mods/peers-panel/.claude-plugin/types/
+mods/peers-panel/tsconfig.json
+mods/peers-panel/node_modules/

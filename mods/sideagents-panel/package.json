@@ -1,0 +1,22 @@
+{
+  "name": "sideagents-panel",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "lint": "biome lint",
+    "lint:fix": "biome lint --write",
+    "test": "claude plugin test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.4"
+  },
+  "private": true
+}

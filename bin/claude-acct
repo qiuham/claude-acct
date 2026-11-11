@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""claude-acct 的薄启动器：只负责加 sys.path、登记自己、交给 cca.cli。"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+import cca.config as _config  # noqa: E402 - 在 sys.path 就绪后、登记 LAUNCHER_ARGV 前导入
+
+# `cca wait --detach` 重新调起同一个启动器（不是 PATH 里的 cca）。
+_config.LAUNCHER_ARGV = [str(Path(__file__).resolve())]
+
+from cca.cli import main  # noqa: E402 - 必须在 LAUNCHER_ARGV 之后导入
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
