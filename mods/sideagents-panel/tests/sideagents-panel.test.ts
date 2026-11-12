@@ -1089,7 +1089,7 @@ function busyPeer(on, { state = {}, events = [], live = '', version = '' } = {})
   const ran: string[][] = []
   on('process.run', ($, e) => {
     ran.push([...e.argv])
-    return { value: { exitCode: 0, stdout: version + '\n', stderr: '' } }
+    return { value: { exitCode: 0, stdout: (typeof version === 'function' ? version() : version) + '\n', stderr: '' } }
   })
   return { clock, ran, opened }
 }
@@ -1257,6 +1257,21 @@ test('横条：缺 code_version 或版本对不上就标“旧版”', async ($,
   const ui = await $.ui.mount({ ...SITE, surface: 'terminal' })
   expect(ran.some((argv) => argv.join(' ') === 'cca sideagent version')).toBe(true)
   expect(await findAny(ui, { type: 'Text', text: /旧版/ })).toBeDefined()
+})
+
+test('横条：面板加载后代码又改了，新起的 sideagent 不标“旧版”（看到没见过的版本就现查一次）', async ($, on) => {
+  const answers = ['v1', 'v2']
+  const { clock, ran } = busyPeer(on, { state: { code_version: 'v2' }, events: TEST_EVENTS,
+    version: () => answers.shift() || 'v2' })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: HOME })
+  await clock.advance(1500)
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...SITE, surface: 'terminal' })
+  expect(ran.filter((argv) => argv.join(' ') === 'cca sideagent version').length).toBe(2)
+  expect(await findAny(ui, { type: 'Text', text: /旧版/ })).toBeUndefined()
+  // 真的旧版：查过一次还对不上，就不再为它反复查
+  await clock.advance(120000)
+  expect(ran.filter((argv) => argv.join(' ') === 'cca sideagent version').length).toBe(2)
 })
 
 test('横条：老进程没有 code_version，也标“旧版”', async ($, on) => {

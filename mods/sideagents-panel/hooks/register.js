@@ -59,6 +59,7 @@ let codeVersion = ''
 // 哪个 sideagent 的详情正开着：那一行的圆点画成 ●、整行加粗，和子代理“正在看”的一样
 let viewedPeer = ''
 let versionTriedAt = 0
+const checkedVersions = new Set()
 const VERSION_RETRY_MS = 60000
 
 // 横条每行的键：名字里可能有 # 之类，统一换成横线，焦点事件里对得上
@@ -191,9 +192,18 @@ async function refreshQuotaHint($) {
   }
 }
 
-async function loadCodeVersion($) {
-  if (codeVersion || Date.now() - versionTriedAt < VERSION_RETRY_MS) return
-  versionTriedAt = Date.now()
+// 看到一个和记下的不一样的版本时再现查一次：面板加载后代码可能又改过，
+// 不然新起的 sideagent（新代码）反倒被当成旧版
+async function loadCodeVersion($, seen = '') {
+  if (codeVersion) {
+    // 每个没见过的版本号只为它重查一次：重查过还对不上，就是真的旧版
+    if (!seen || seen === codeVersion || checkedVersions.has(seen)) return
+    checkedVersions.add(seen)
+  } else {
+    // 还没读到过（例如 cca 不在）：别每次刷新都去试
+    if (Date.now() - versionTriedAt < VERSION_RETRY_MS) return
+    versionTriedAt = Date.now()
+  }
   try {
     const out = await $.process.run(['cca', 'sideagent', 'version'], { timeoutMs: 5000 })
     if (out && Number(out.exitCode) === 0) codeVersion = String(out.stdout || '').trim()
@@ -583,7 +593,7 @@ async function collect($) {
       ended.push({ name, note: note || {}, state })
       continue
     }
-    if (state.code_version) await loadCodeVersion($)
+    if (state.code_version) await loadCodeVersion($, String(state.code_version))
     const peer = await readPeer($, folder, name, { state, note: note || {}, attached })
     if (attached) sawExternal = true
     nextRows.push(peer.row)
