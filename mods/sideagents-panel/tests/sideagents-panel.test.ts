@@ -5,7 +5,7 @@ import { checkMark, columnWidths } from '../hooks/list-pane.js'
 import { ccaCompletions } from '../hooks/cca-command.js'
 import { otherTasksText } from '../hooks/register.js'
 import { QUOTA_POLL_MS, parseHint, parseQuota, withHint } from '../hooks/quota-hint.js'
-import { activityOf, notifyKey, waitingWhat, headerMeta, whoOf, statusText, arrowTarget, recallStep, bandLayout, compactCount, displayWidth, elapsedText, foldTasks, footerRows, taskKind } from '../hooks/register.js'
+import { activityOf, notifyKey, waitingWhat, headerMeta, whoOf, statusText, arrowTarget, recallStep, bandLayout, compactCount, displayWidth, elapsedText, foldTasks, footerRows, taskKind, workflowCounts, progressBar } from '../hooks/register.js'
 
 const HOME = '/home/test'
 const SID = 'sess-test'
@@ -1713,6 +1713,28 @@ test('后台任务按原生四类分：子代理（含分叉 Skill）、后台�
   expect(rows.map((row: any) => Boolean(row.agent))).toEqual([true, true, false, false, false])
 })
 
+test('工作流那一行：进度条、当前阶段、出错几个；新记录用算好的数', () => {
+  const ev = (extra: any) => [
+    { kind: 'tool', name: 'Workflow', id: 'tW', input: {} },
+    { kind: 'bgtask', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow', tool_use_id: 'tW', workflow_name: '出题' },
+    { kind: 'bgtask', subtype: 'task_progress', task_id: 'w1', usage: { total_tokens: 377774 }, ...extra },
+  ]
+  const brief = (events: any[]) => footerRows(events, events, { agents: [], agentDone: () => true })
+    .map((row: any) => row.kind + '(' + row.desc + ') ' + row.doing)
+  expect(brief(ev({ workflow_counts: { total: 30, done: 16, error: 2, running: 12, phase: 'Verify' } })))
+    .toEqual(['Workflow(出题) ▕██████░░░░▏ 18/30 · Verify · 2 出错 · 377.8k tok'])
+  // 旧记录只有完整清单：现算
+  const items = [
+    { type: 'workflow_phase', index: 1, title: 'Generate' },
+    { type: 'workflow_agent', index: 1, phaseIndex: 1, phaseTitle: 'Generate', state: 'done' },
+    { type: 'workflow_agent', index: 2, phaseIndex: 1, phaseTitle: 'Generate', state: 'progress' },
+  ]
+  expect(brief(ev({ workflow_progress: items }))).toEqual(['Workflow(出题) ▕█████░░░░░▏ 1/2 · Generate · 377.8k tok'])
+  expect(workflowCounts({ workflow_progress: items })).toEqual({ total: 2, done: 1, error: 0, running: 1, phase: 'Generate' })
+  expect(progressBar(0, 0)).toBe('')
+  expect(progressBar(3, 3)).toBe('▕██████████▏ 3/3')
+})
+
 test('没有 bgtask 的旧记录：照旧按工具名认子代理', () => {
   const old = [
     { kind: 'tool', name: 'Agent', id: 'a1', input: { description: '查文档' } },
@@ -1722,7 +1744,7 @@ test('没有 bgtask 的旧记录：照旧按工具名认子代理', () => {
   expect(rows.map((row: any) => row.kind + '(' + row.desc + ')')).toEqual(['Agent(查文档)'])
 })
 
-test('详情页：底部只列子代理（含 Skill），其余写一行数量；做完的不画，子代理那一行能点进去', async ($, on) => {
+test('详情页：底部一行一个子代理（含 Skill）和工作流（带进度），后台命令、监视写一行数量；做完的不画，子代理那一行能点进去', async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, { HOME, CLAUDE_CODE_SESSION_ID: SID })
   on('command.register', () => ({ value: undefined }))
@@ -1746,9 +1768,9 @@ test('详情页：底部只列子代理（含 Skill），其余写一行数量�
   await band.press({ key: 'peer-ds#aaa' })
   await band.unmount()
   const pane = await $.ui.mount({ plugin: 'sideagents-panel', component: 'Pane', requestId: 'peer-ds-aaa', viewport: { columns: 120, rows: 40 }, props: { title: 'ds#aaa', bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 60 }, view: {} }, surface: 'terminal' })
-  for (const label of [/^◯ Agent\(查文档\)/, /^◯ Skill\(code-review\)/]) expect(await hasTask(pane, label)).toBe(true)
+  for (const label of [/^◯ Agent\(查文档\)/, /^◯ Skill\(code-review\)/, /^◯ Workflow\(review-changes\)/]) expect(await hasTask(pane, label)).toBe(true)
   expect(await hasTask(pane, /Bash\(sleep 30/)).toBe(false)
-  expect(await pane.find({ type: 'Text', text: /还有 1 个后台命令 · 1 个监视 · 1 个工作流/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /还有 1 个后台命令 · 1 个监视$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /早做完了/ })).toBeUndefined()
   // 子代理那一行点进去看它自己的动作
   await pane.press({ key: 'agent-peer-ds-aaa-0' })
@@ -2140,7 +2162,7 @@ test('前台命令（is_backgrounded: false）不当成后台任务画在底部'
   expect(rows).toEqual([])
 })
 
-test('底下只列子代理；后台命令、监视、工作流只写一行数量', () => {
+test('后台命令、监视只写一行数量', () => {
   expect(otherTasksText([{ kind: 'Bash' }, { kind: 'Bash' }, { kind: 'Monitor' }])).toBe('还有 2 个后台命令 · 1 个监视')
   expect(otherTasksText([])).toBe('')
 })

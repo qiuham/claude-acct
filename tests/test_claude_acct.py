@@ -1934,6 +1934,15 @@ class CliTest(unittest.TestCase):
         again = self.run_cli("mv", "cx", "other")
         self.assertNotEqual(again.returncode, 0, "旧名已不存在，应报错")
 
+    def test_ls_accepts_glob_filter(self):
+        for name in ("b001", "b002", "003"):
+            self.run_cli("new", name)
+        data = json.loads(self.run_cli("ls", "b*", "--json", "--cached").stdout)
+        self.assertEqual([p["profile"] for p in data["profiles"]], ["b001", "b002"])
+        r = self.run_cli("ls", "z*")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("没有这个号: z*", r.stdout + r.stderr)
+
     def test_ls_accepts_profile_filter(self):
         """`cca ls 006` 只看指定号；不认识的号名给明确报错（不是"多余参数"）。"""
         self.run_cli("new", "002")

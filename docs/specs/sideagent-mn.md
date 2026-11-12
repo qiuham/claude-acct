@@ -22,6 +22,7 @@
     summary.log               原来的 .summary.log
     result.json               原来的 .last.json
     log                       原来的 .log
+    workflows/<任务编号>.json  工作流最新的完整进度（阶段 + 每个子代理），每次覆盖
     run/                      只在跑的时候有，停了整个删掉
       sock  live  result.lock 原来的 .sock、.live、.last.lock
   sessions/<主会话完整编号>.json   这个会话用着哪些 sideagent（只有这个会话自己写）

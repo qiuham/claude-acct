@@ -184,8 +184,36 @@ class TaskEventTest(unittest.TestCase):
                                     "usage": {"total_tokens": 1200, "tool_uses": 3, "duration_ms": 5},
                                     "last_tool_name": "Bash", "workflow_progress": [{"phase": "Review", "x": {}}]})
         self.assertEqual(got["usage"], {"total_tokens": 1200, "tool_uses": 3, "duration_ms": 5})
-        self.assertEqual(got["workflow_progress"], [{"phase": "Review"}])
+        self.assertEqual(got["workflow_progress"], [{}])
         self.assertIsNone(sideagent.task_event({"type": "system", "subtype": "init"}))
+
+    def test_workflow_progress_kept_whole_and_counted(self):
+        """清单超过 30 项也全留（以前只留前 30 项，后面阶段的子代理面板看不到）；大字段砍掉。"""
+        items = [{"type": "workflow_phase", "index": 1, "title": "Generate"},
+                 {"type": "workflow_phase", "index": 2, "title": "Verify"}]
+        items += [{"type": "workflow_agent", "index": i, "label": f"gen:{i}", "phaseIndex": 1,
+                   "phaseTitle": "Generate", "state": "done", "promptPreview": "x" * 500} for i in range(1, 41)]
+        items += [{"type": "workflow_agent", "index": 41, "label": "verify:1", "phaseIndex": 2,
+                   "phaseTitle": "Verify", "state": "progress"},
+                  {"type": "workflow_agent", "index": 42, "label": "verify:2", "phaseIndex": 2,
+                   "phaseTitle": "Verify", "state": "error", "error": "boom"}]
+        got = sideagent.task_event({"type": "system", "subtype": "task_progress", "task_id": "w1",
+                                    "workflow_progress": items})
+        self.assertEqual(len(got["workflow_progress"]), 44)
+        self.assertNotIn("promptPreview", got["workflow_progress"][2])
+        self.assertEqual(got["workflow_counts"], {"total": 42, "done": 40, "error": 1, "running": 1,
+                                                  "phase": "Verify", "phases": ["Generate", "Verify"]})
+
+    def test_workflow_counts_all_done_uses_last_phase(self):
+        items = [{"type": "workflow_agent", "index": 1, "phaseIndex": 1, "phaseTitle": "A", "state": "done"},
+                 {"type": "workflow_agent", "index": 2, "phaseIndex": 2, "phaseTitle": "B", "state": "done"}]
+        self.assertEqual(sideagent.workflow_counts(items)["phase"], "B")
+        self.assertEqual(sideagent.workflow_counts([]), {"total": 0, "done": 0, "error": 0, "running": 0})
+
+    def test_workflow_path_is_safe(self):
+        path = sideagent.workflow_path("ds#abc", "../w 1")
+        self.assertEqual(path.name, "w1.json")
+        self.assertEqual(path.parent.name, "workflows")
 
 
 class ToolSummaryTest(unittest.TestCase):
@@ -396,6 +424,193 @@ class _ServerCase(unittest.TestCase):
                 break
             data += chunk
         return json.loads(data.split(b"\n")[0]) if data.strip() else {}
+
+
+class WorkflowEventServerTest(_ServerCase):
+    def test_workflow_progress_goes_to_its_own_file(self):
+        """完整清单覆盖写 workflows/<任务编号>.json；事件文件里只留几个数。"""
+        items = [{"type": "workflow_agent", "index": 1, "phaseTitle": "A", "phaseIndex": 1, "state": "done"}]
+        entry = sideagent.task_event({"type": "system", "subtype": "task_progress", "task_id": "w9",
+                                      "task_type": "local_workflow", "workflow_progress": items})
+        self.server._note_event(entry)  # noqa: SLF001
+        self.server._note_event(entry)  # noqa: SLF001
+        saved = json.loads(sideagent.workflow_path("ds#t1", "w9").read_text(encoding="utf-8"))
+        self.assertEqual(saved["items"][0]["state"], "done")
+        lines = [json.loads(line) for line in
+                 sideagent._events_path("ds#t1").read_text(encoding="utf-8").splitlines()]  # noqa: SLF001
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(all("workflow_progress" not in line for line in lines))
+        self.assertEqual(lines[0]["workflow_counts"]["done"], 1)
+
+
+class BackgroundHoldServerTest(_ServerCase):
+    """一轮结束时后台还有任务：结果先压着，等后台做完、claude 自己开的那一轮出结果再交。
+
+    后台有哪些任务照 claude 的 background_tasks_changed（整份名单）来，不自己配对开始/结束。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.live = []
+
+    def feed(self, event: dict) -> None:
+        line = json.dumps(event) + "\n"
+        self.server._note_progress(line)  # noqa: SLF001
+        with self.server.lock:
+            target = self.server.current
+        self.server._forward(target, line)  # noqa: SLF001
+
+    def result_of(self, sock, wait=2.0):
+        """调用方 socket 上收到的结果那一行（前面的其它事件跳过）；没有就 None。"""
+        sock.settimeout(wait)
+        data = b""
+        while True:
+            for raw in data.split(b"\n"):
+                if raw.strip() and json.loads(raw).get("type") == "result":
+                    return json.loads(raw)
+            try:
+                chunk = sock.recv(65536)
+            except TimeoutError:
+                return None
+            if not chunk:
+                return None
+            data += chunk
+
+    def start_turn(self):
+        ours, theirs = self.pair()
+        self.server.busy = True
+        self.server.current = theirs
+        self.server.turn_keep = False
+        return ours
+
+    def snapshot(self):
+        self.feed({"type": "system", "subtype": "background_tasks_changed", "tasks": list(self.live)})
+
+    def bg_started(self, task="w1", tool="t1", task_type="local_workflow", **flags):
+        # claude 的顺序：先进名单，再发 task_started
+        self.live.append({"task_id": task, "task_type": task_type, "description": "x", **flags})
+        self.snapshot()
+        self.feed({"type": "system", "subtype": "task_started", "task_id": task, "tool_use_id": tool,
+                   "task_type": task_type})
+
+    def bg_done(self, task="w1", status="completed"):
+        self.feed({"type": "system", "subtype": "task_notification", "task_id": task, "status": status})
+        self.live = [one for one in self.live if one["task_id"] != task]
+        self.snapshot()
+
+    def test_result_waits_for_background_then_final_is_delivered(self):
+        ours = self.start_turn()
+        self.bg_started()
+        self.feed({"type": "result", "result": "工作流已启动"})
+        self.assertTrue(self.server.busy)
+        self.assertEqual(self.server.exit_at, 0.0)
+        self.assertIsNone(self.result_of(ours, wait=0.2))
+        self.bg_done()
+        self.feed({"type": "result", "result": "最终：30"})
+        self.assertEqual(self.result_of(ours)["result"], "最终：30")
+        self.assertFalse(self.server.busy)
+        self.assertGreater(self.server.exit_at, 0)
+
+    def test_held_tells_the_caller(self):
+        ours = self.start_turn()
+        self.bg_started()
+        self.feed({"type": "result", "result": "已启动"})
+        ours.settimeout(1)
+        got = b""
+        while b"cca_held" not in got:
+            got += ours.recv(65536)
+        self.assertIsNone(self.result_of(ours, wait=0.2))
+
+    def test_caller_keeps_only_the_final_turns_text(self):
+        """调用方那边：被压下那一轮说的话清掉，只留后台做完后那一轮的回复。"""
+        collector = sideagent._Collector()  # noqa: SLF001
+        def say(text):
+            return json.dumps({"type": "stream_event", "event": {"type": "content_block_delta",
+                                                                "delta": {"type": "text_delta", "text": text}}}).encode()
+        collector.feed(say("工作流已启动"))
+        self.assertFalse(collector.feed(b'{"type": "cca_held", "background": 1}'))
+        collector.feed(say("最终：30"))
+        self.assertTrue(collector.feed(json.dumps({"type": "result", "result": "最终：30"}).encode()))
+        self.assertEqual(collector.text, "最终：30")
+
+    def test_monitor_ambient_and_awaited_do_not_hold(self):
+        ours = self.start_turn()
+        self.feed({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "tm", "name": "Monitor", "input": {}}]}})
+        self.bg_started("m1", "tm", task_type="local_bash")
+        self.bg_started("e1", "te", task_type="local_bash", ambient=True)
+        self.bg_started("a1", "ta", task_type="local_agent", awaited=True)
+        self.assertEqual(self.server.background, set())
+        self.feed({"type": "result", "result": "完成"})
+        self.assertEqual(self.result_of(ours)["result"], "完成")
+        self.assertFalse(self.server.busy)
+
+    def test_foreground_backgrounded_later_holds(self):
+        """前台命令后来被挪到后台（Ctrl+B 那种）：claude 把它放进名单，照样压着结果。"""
+        ours = self.start_turn()
+        self.live.append({"task_id": "b1", "task_type": "local_bash", "description": "build"})
+        self.snapshot()
+        self.feed({"type": "result", "result": "构建挪到后台了"})
+        self.assertTrue(self.server.busy)
+        self.assertIsNone(self.result_of(ours, wait=0.2))
+
+    def test_no_stall_or_idle_exit_while_background_runs(self):
+        self.start_turn()
+        self.bg_started()
+        self.feed({"type": "result", "result": "已启动"})
+        self.server.last_output = self.server.last_activity = 0
+        self.assertFalse(self.server._stalled())  # noqa: SLF001
+        self.assertFalse(self.server._idle_too_long())  # noqa: SLF001
+
+    def test_interrupt_while_held_stops_background_then_releases(self):
+        ours = self.start_turn()
+        self.bg_started()
+        self.feed({"type": "result", "result": "已启动"})
+        self.server._interrupt()  # noqa: SLF001
+        sent = [line["request"] for line in self.server.process.stdin.lines]
+        self.assertEqual(sent, [{"subtype": "stop_task", "task_id": "w1"}])
+        self.assertIsNone(self.result_of(ours, wait=0.2))
+        self.bg_done(status="stopped")
+        got = self.result_of(ours)
+        self.assertEqual(got["result"], "已启动")
+        self.assertTrue(got["cca_interrupted"])
+        self.assertFalse(self.server.busy)
+
+    def test_interrupt_during_the_final_turn_is_a_normal_interrupt(self):
+        ours = self.start_turn()
+        self.bg_started()
+        self.feed({"type": "result", "result": "已启动"})
+        self.bg_done()
+        self.server._interrupt()  # noqa: SLF001
+        self.assertEqual(self.server.process.stdin.lines[-1]["request"]["subtype"], "interrupt")
+        self.feed({"type": "result", "result": "半截"})
+        got = self.result_of(ours)
+        self.assertEqual(got["result"], "半截")
+        self.assertTrue(got["cca_interrupted"])
+
+    def test_failed_turn_is_not_held(self):
+        ours = self.start_turn()
+        self.bg_started()
+        self.feed({"type": "result", "result": "API 出错", "is_error": True})
+        self.assertTrue(self.result_of(ours)["is_error"])
+        self.assertFalse(self.server.busy)
+
+    def test_held_followup_turn_is_not_dropped_as_empty(self):
+        self.start_turn()
+        self.server.followup_turn = True
+        self.bg_started()
+        self.feed({"type": "result", "result": "已启动"})
+        self.server.last_output = 0
+        self.server._drop_empty_followup()  # noqa: SLF001
+        self.assertTrue(self.server.busy)
+        self.assertIsNotNone(self.server.held)
+
+    def test_lingering_exit_waits_for_background(self):
+        self.server.exit_at = time.time() - 1
+        self.server.background = {"w1"}
+        self.assertFalse(self.server._done_lingering())  # noqa: SLF001
+        self.server.background = set()
+        self.assertTrue(self.server._done_lingering())  # noqa: SLF001
 
 
 class InterruptServerTest(_ServerCase):

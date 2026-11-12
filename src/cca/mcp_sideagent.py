@@ -75,7 +75,7 @@ TOOLS = [
                           "description": "可选：这个实例用哪个模型（如 sonnet、opus、haiku，按那个号的配置解析）；"
                                          "只对派新活有用，追问时沿用原来的"},
                 "message": {"type": "string", "description": "要它做的事"},
-                "timeout_seconds": {"type": "number", "description": "最多等多久，默认 600 秒"},
+                "timeout_seconds": {"type": "number", "description": "background=false 时最多等多久，默认 600 秒；后台派活不限时"},
                 "background": {"type": "boolean",
                                "description": "默认 true：立刻返回，干完自动回报；显式传 false 才在原地等结果"},
                 "include_context": {"type": "boolean",
@@ -431,7 +431,6 @@ def _send_job(arguments: dict) -> str:
     info = sideagent.status(name)
     if arguments.get("background", True):
         job = _start_job(name, message, {
-            "timeout": timeout,
             "keep": keep,
             "notify": bool(arguments.get("notify", True)),
             "interject": interject,
@@ -747,7 +746,6 @@ TOOL_HANDLERS = {
 def _start_job(name: str, message: str, opts: dict) -> str:
     """后台跑一次 ask；完成（或失败）后把结果写进 <名字>/result.json。返回任务编号。"""
 
-    timeout = float(opts.get("timeout") or sideagent.SEND_TIMEOUT)
     keep = bool(opts.get("keep"))
     notify = bool(opts.get("notify", True))
     interject = bool(opts.get("interject"))
@@ -759,7 +757,8 @@ def _start_job(name: str, message: str, opts: dict) -> str:
     def run() -> None:
         try:
             # 后台任务：做完默认要叫醒主会话，不然只能自己去查
-            result = sideagent.ask(name, message, timeout, notify=notify, job=base["id"],
+            # 后台派活不限时：sideagent 结束时一定交结果或报错（卡住、进程退出时连接会断）
+            result = sideagent.ask(name, message, None, notify=notify, job=base["id"],
                               interject=interject, keep=keep)
             if result.get("merged"):
                 _write_job(name, {**base, "state": "merged",

@@ -61,6 +61,15 @@ class _SideagentServer:
         # 插话：uuid -> {text, notify, job, started}；claude 用 command_lifecycle 报它进没进这一轮
         self.injected: dict = {}
         self.followup_turn = False
+        # 还在跑的后台任务（task_id）：照 claude 的 background_tasks_changed 整份替换，不自己配对开始/结束。
+        # 环境任务（ambient）、被等着的（awaited）、Monitor 起的不算：前两个不是这一轮的活，Monitor 本来就一直开着
+        self.background: set = set()
+        self.background_live: set = set()
+        self.monitor_tools: set = set()
+        self.monitor_tasks: set = set()
+        # 一轮结束时后台还有任务（工作流、后台子代理、后台命令）：先压下的那个结果事件。
+        # 后台做完时 claude 会自己再开一轮，那一轮的结果才是最终的
+        self.held: dict | None = None
         # 这一轮有没有调用方在 socket 上等结果；调用方说了 keep=false 就干完自己退出
         self.turn_waited = False
         self.turn_keep = True
@@ -462,8 +471,12 @@ class _SideagentServer:
             if event.get("subtype") == "api_retry":
                 self._note_api_retry(event)
                 return
+            if event.get("subtype") == "background_tasks_changed":
+                self._set_background(event.get("tasks"))
+                return
             entry = core.task_event(event)
             if entry:
+                self._note_monitor(entry)
                 self._note_event(entry)
             return
         handlers = {"assistant": self._note_assistant,
@@ -645,10 +658,29 @@ class _SideagentServer:
         return note_text
 
     def _note_event(self, entry: dict) -> None:
-        """把一步详细经过写成一行 JSON，界面按主界面的样子画。"""
+        """把一步详细经过写成一行 JSON，界面按主界面的样子画。
+
+        工作流的完整进度每次都是一整份清单，不追加进事件文件，单独覆盖写一个文件。
+        """
+        progress = entry.get("workflow_progress")
+        if progress is not None:
+            entry = {key: value for key, value in entry.items() if key != "workflow_progress"}
+            self._save_workflow(entry.get("task_id") or "", progress)
         entry = {**entry, "t": round(time.time() - self.turn_started, 1)}
         with suppress(OSError), core._events_path(self.name).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def _save_workflow(self, task_id: str, progress: list) -> None:
+        """工作流最新的完整进度：先写临时文件再改名，界面不会读到写了一半的。"""
+        if not task_id:
+            return
+        path = core.workflow_path(self.name, task_id)
+        with suppress(OSError):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"task_id": task_id, "items": progress}, ensure_ascii=False),
+                           encoding="utf-8")
+            tmp.replace(path)
 
     def _trim_events(self) -> None:
         """事件文件太长就砍掉前面的，只留最近 2000 行，别让界面越读越慢。"""
@@ -700,8 +732,66 @@ class _SideagentServer:
             line = json.dumps(event, ensure_ascii=False) + "\n"
         return event, line
 
+    def _set_background(self, tasks) -> None:
+        """claude 发来后台任务的整份名单：照它换掉自己记的。打断后等着的那一轮，名单空了就交结果。"""
+        live = {str(task.get("task_id") or "") for task in tasks or []
+                if isinstance(task, dict) and not task.get("ambient") and not task.get("awaited")}
+        with self.lock:
+            self.background_live = live - {""}
+            self.background = self.background_live - self.monitor_tasks
+            release = self.held is not None and self.turn_interrupted and not self.background
+        if release:
+            self._release_held()
+
+    def _note_monitor(self, entry: dict) -> None:
+        """Monitor 起的任务在名单里也是 local_bash，靠它的 task_started 带的工具编号认出来，不算后台的活。"""
+        if entry.get("subtype") != "task_started" or entry.get("tool_use_id") not in self.monitor_tools:
+            return
+        with self.lock:
+            self.monitor_tasks.add(entry.get("task_id") or "")
+            self.background = self.background_live - self.monitor_tasks
+
+    def _should_hold(self, event: dict | None) -> bool:
+        """这一轮的结果先压下：后台还有任务在跑，又不是被打断、不是出错。"""
+        if not event or event.get("type") != "result":
+            return False
+        with self.lock:
+            return bool(self.background) and self.busy and not self.turn_interrupted \
+                and not event.get("is_error")
+
+    def _hold(self, event: dict) -> None:
+        """压下这一轮的结果：不交给调用方、不回报、不退出，等后台做完 claude 自己开的那一轮。"""
+        with self.lock:
+            self.held = event
+            count = len(self.background)
+            target = self.current
+        # 告诉等结果的调用方：前面这轮说的话不是最终回复（它会清掉已收的正文）
+        if target is not None:
+            with suppress(OSError):
+                target.sendall((json.dumps({"type": "cca_held", "background": count}) + "\n").encode("utf-8"))
+        self._note_text(f"WAIT 后台还有 {count} 个任务在跑，做完再交结果")
+        self._update_state(waiting_background=count)
+
+    def _release_held(self) -> None:
+        """主会话打断了等后台的这一轮，后台任务也停完了：claude 不会再开一轮，把压下的交出去（标成被打断）。"""
+        with self.lock:
+            event = self.held
+            target = self.current
+        if event is None:
+            return
+        line = json.dumps(event, ensure_ascii=False) + "\n"
+        if target is not None:
+            try:
+                target.sendall(line.encode("utf-8"))
+            except OSError:
+                target = None
+        self._end_turn(target, event)
+
     def _forward(self, target: socket.socket | None, line: str) -> None:
         event, line = self._annotate(line)
+        if self._should_hold(event):
+            self._hold(event)
+            return
         if target is not None:
             try:
                 target.sendall(line.encode("utf-8"))
@@ -712,6 +802,8 @@ class _SideagentServer:
                 if isinstance(block, dict) and block.get("type") == "tool_use":
                     with self.lock:
                         self.turn_tools.add(str(block.get("name") or ""))
+                        if block.get("name") == "Monitor":
+                            self.monitor_tools.add(str(block.get("id") or ""))
         if event and event.get("type") == "result":
             self._end_turn(target, event)
 
@@ -724,6 +816,7 @@ class _SideagentServer:
         with self.lock:
             self.current = None
             self.busy = False
+            self.held = None
             want_notify = self.notify_turn
             self.notify_turn = False
             followup = self.followup_turn
@@ -741,7 +834,7 @@ class _SideagentServer:
         # “有人在等”的由界面叫醒主代理
         # 插话自己的那一轮、调用方断了由这里直接回报的，也算“已交回”，界面就不再叫一遍
         self._update_state(delivered_to_caller=target is not None or followup or (lost and want_notify),
-                           notify=want_notify, busy=False, turn_started=0)
+                           notify=want_notify, busy=False, turn_started=0, waiting_background=0)
         # 把“要叫醒”也写进进度：老面板只看进度文件
         if want_notify:
             with suppress(OSError), self.progress.open("a", encoding="utf-8") as handle:
@@ -780,11 +873,17 @@ class _SideagentServer:
                                   "tool_uses": event.get("cca_tool_uses"),
                                   "token_count": event.get("cca_token_count")})
 
+    def _idle_too_long(self) -> bool:
+        """闲太久：没在干活、后台也没任务，又很久没有输出。压着结果等后台时不算闲。"""
+        with self.lock:
+            working = self.busy or bool(self.background)
+        return not working and time.time() - self.last_activity > self.idle_seconds
+
     def _done_lingering(self) -> bool:
         """keep=false 的活干完、留够了时间、又没接新活：该退出了。"""
         with self.lock:
             return (bool(self.exit_at) and time.time() >= self.exit_at
-                    and not self.busy and not self.queue)
+                    and not self.busy and not self.queue and not self.background)
 
     def _begin_followup(self) -> bool:
         """插话没赶上这一轮（最后一步没有工具调用）：claude 会马上另开一轮跑它。
@@ -812,7 +911,8 @@ class _SideagentServer:
         就当没有这一轮，放开忙碌，接着发排队的下一条，不让它一直挂着。
         """
         with self.lock:
-            if not (self.followup_turn and self.busy):
+            if not (self.followup_turn and self.busy) or self.held is not None:
+                # 压着结果等后台的那一轮是真有的一轮，不是“没开成的插话轮”
                 return
             if time.time() - self.last_output <= core.FOLLOWUP_GRACE:
                 return
@@ -860,7 +960,7 @@ class _SideagentServer:
             if self._stalled():
                 self._give_up()
                 return False
-            if time.time() - self.last_activity > self.idle_seconds or self._done_lingering():
+            if self._idle_too_long() or self._done_lingering():
                 return False
             self._touch()
             return True
@@ -939,7 +1039,8 @@ class _SideagentServer:
 
     def _stalled(self) -> bool:
         """在一轮里，超过 STALL_SECONDS 一条输出都没有。api_retry 也算输出，所以 CC 在重试时不会触发。"""
-        if not self.busy:
+        if not self.busy or self.background:
+            # 后台任务在跑时没有输出是正常的（例如 sleep 的后台命令）
             return False
         return time.time() - self.last_output > core.STALL_SECONDS
 
@@ -981,14 +1082,29 @@ class _SideagentServer:
             busy = self.busy
             if busy:
                 self.turn_interrupted = True
+            waiting = sorted(self.background) if self.held is not None else []
+            if waiting:
+                self.held = {**self.held, "cca_interrupted": True}
         if busy:
             self._note_text("INTERRUPT 主会话打断了这一轮")
-        request = {"type": "control_request", "request_id": f"int-{int(time.time() * 1000)}",
-                   "request": {"subtype": "interrupt"}}
-        with suppress(OSError):
-            self.process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
-            self.process.stdin.flush()
+        if waiting:
+            # 结果压着、claude 闲着等后台：打断 = 把这一轮起的后台任务停掉。
+            # 停完 claude 发空名单，那时把压下的结果交出去（_set_background），claude 不会再开一轮
+            for task in waiting:
+                self._send_control({"subtype": "stop_task", "task_id": task})
+            return busy
+        self._send_control({"subtype": "interrupt"})
         return busy
+
+    def _send_control(self, request: dict) -> None:
+        """给 claude 发一条控制请求（打断、停后台任务）。"""
+        if self.process is None or self.process.stdin is None:
+            return
+        line = {"type": "control_request", "request_id": f"{request['subtype']}-{time.time_ns()}",
+                "request": request}
+        with suppress(OSError):
+            self.process.stdin.write(json.dumps(line, ensure_ascii=False) + "\n")
+            self.process.stdin.flush()
 
     def _dispatch(self) -> None:
         """取队首开跑。已经有一轮在跑就什么都不做。"""

@@ -816,7 +816,7 @@ const TASK_DONE = new Set(['completed', 'failed', 'killed', 'stopped', 'cancelle
 
 // 同一个 task_id 的几条事件并成一条：最新的描述、状态、进度
 const TASK_FIELDS = ['task_type', 'tool_use_id', 'description', 'subagent_type', 'workflow_name',
-  'last_tool_name', 'summary', 'workflow_progress', 'status']
+  'last_tool_name', 'summary', 'workflow_progress', 'workflow_counts', 'status']
 
 function mergeTask(task, ev) {
   for (const key of TASK_FIELDS) {
@@ -851,15 +851,45 @@ export function taskKind(task, toolOf) {
   return ''
 }
 
-// 工作流现在到哪：最后一个有名字的阶段
-function workflowStage(progress) {
-  const list = Array.isArray(progress) ? progress : []
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    const item = list[i] || {}
-    const label = item.title || item.phase || item.label || item.name || ''
-    if (label) return String(label) + (item.status ? ' ' + item.status : '')
+// 工作流的几个数：新记录里 cca 已经算好（workflow_counts）；旧记录只有清单，照同样的规矩现算
+export function workflowCounts(task) {
+  if (task.workflow_counts && typeof task.workflow_counts === 'object') return task.workflow_counts
+  const list = Array.isArray(task.workflow_progress) ? task.workflow_progress : []
+  const agents = list.filter((item) => item && item.type === 'workflow_agent')
+  if (!agents.length) {
+    // 更老的记录：只有阶段名，没有子代理
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const item = list[i] || {}
+      const label = item.title || item.phase || item.label || item.name || ''
+      if (label) return { total: 0, phase: String(label) + (item.status ? ' ' + item.status : '') }
+    }
+    return { total: 0 }
   }
-  return ''
+  const count = (states) => agents.filter((item) => states.includes(item.state)).length
+  const open = agents.filter((item) => item.state !== 'done' && item.state !== 'error')
+  const pool = open.length ? open : agents
+  const key = (item) => (Number(item.phaseIndex) || 0) * 1e6 + (Number(item.index) || 0)
+  const last = pool.reduce((best, item) => (key(item) > key(best) ? item : best), pool[0])
+  return { total: agents.length, done: count(['done']), error: count(['error']),
+    running: count(['start', 'progress']), phase: String(last.phaseTitle || '') }
+}
+
+const BAR_CELLS = 10
+
+// 文字进度条：▕██████░░░░▏ 18/30（出错的也算走完了）
+export function progressBar(finished, total) {
+  if (!total) return ''
+  const filled = Math.min(BAR_CELLS, Math.round((finished / total) * BAR_CELLS))
+  return '▕' + '█'.repeat(filled) + '░'.repeat(BAR_CELLS - filled) + '▏ ' + finished + '/' + total
+}
+
+// 工作流那一行的“在做什么”：进度条 · 阶段 · 出错几个
+function workflowDoing(task) {
+  const counts = workflowCounts(task)
+  const total = Number(counts.total) || 0
+  const errors = Number(counts.error) || 0
+  return [progressBar((Number(counts.done) || 0) + errors, total), counts.phase || '',
+    errors ? errors + ' 出错' : ''].filter(Boolean).join(' · ')
 }
 
 function kilo(count) {
@@ -896,9 +926,8 @@ function taskRow(task, kind, { toolOf, allEvents }) {
   if (kind === 'monitor') {
     return { kind: 'Monitor', desc: String(task.description || tool.input?.description || ''), doing: '监视中' }
   }
-  const stage = workflowStage(task.workflow_progress)
   return { kind: 'Workflow', desc: String(task.workflow_name || task.description || ''),
-    doing: [stage || task.last_tool_name || '运行中', taskMeta(task)].filter(Boolean).join(' · ') }
+    doing: [workflowDoing(task) || task.last_tool_name || '运行中', taskMeta(task)].filter(Boolean).join(' · ') }
 }
 
 // 底部要画的行：有 bgtask 事件就照原生分类；旧记录没有，就按工具名猜（Agent/Task、分叉执行的 Skill）
@@ -1053,20 +1082,20 @@ function paneFooter(el, ctx) {
     })],
   }))
   const input = showInput ? replyBox(el, ctx) : null
-  // 底下只列子代理（含分叉执行的 Skill），和主界面输入框下面一样；后台命令、监视、工作流只写一行数量
-  const agentRows = runningRows.filter((row) => row.agent)
-  const agents = agentRows.length ? [taskBand(el, ctx, agentRows)] : []
-  const others = otherTasksText(runningRows.filter((row) => !row.agent))
+  // 底下一行一个：子代理（含分叉执行的 Skill）和工作流（带进度条）；后台命令、监视只写一行数量
+  const shown = runningRows.filter((row) => row.agent || row.kind === 'Workflow')
+  const agents = shown.length ? [taskBand(el, ctx, shown)] : []
+  const others = otherTasksText(runningRows.filter((row) => !row.agent && row.kind !== 'Workflow'))
   const summary = others ? [Text({ dimColor: true, wrap: 'truncate-end', children: ['  ' + others] })] : []
-  // 记下这页能用 ↑↓ 走到的行：输入框在前，子代理行跟着（ui.scroll 里用）
+  // 记下这页能用 ↑↓ 走到的行：输入框在前，能点进去的子代理行跟着（ui.scroll 里用）
   footerKeys[ctx.paneId] = [
     ...(input ? ['reply-' + ctx.paneId] : []),
-    ...agentRows.map((row, index) => agentRowKey(ctx.paneId, index)),
+    ...shown.flatMap((row, index) => (row.agent ? [agentRowKey(ctx.paneId, index)] : [])),
   ]
   return [...pending, ...(input ? [input] : []), ...agents, ...summary]
 }
 
-// 子代理以外还在跑的：“还有 2 个后台命令 · 1 个监视”；一个都没有就是空
+// 没单独占一行的还在跑的：“还有 2 个后台命令 · 1 个监视”；一个都没有就是空
 export function otherTasksText(rows) {
   const names = { Bash: '后台命令', Monitor: '监视', Workflow: '工作流' }
   const counts = {}

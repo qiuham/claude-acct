@@ -224,13 +224,54 @@ def _tool_summary(data) -> str:
 TASK_SUBTYPES = ("task_started", "task_progress", "task_updated", "task_notification")
 
 
+# 工作流进度里面板要用的字段；提示词开头、结果开头这类大字段不留
+_WORKFLOW_KEYS = ("type", "index", "title", "label", "phaseIndex", "phaseTitle", "state", "agentId",
+                  "model", "attempt", "lastToolName", "lastToolSummary", "tokens", "toolCalls",
+                  "durationMs", "error", "startedAt")
+# 一个工作流最多记这么多项（阶段 + 子代理），防止异常输入撑爆文件
+WORKFLOW_MAX_ITEMS = 2000
+_AGENT_RUNNING = ("start", "progress")
+
+
 def _clip_progress(value):
-    """工作流各阶段进度：只留面板画得到的，别把整份计划写进事件文件。"""
+    """工作流各阶段进度：Claude Code 每次给一份完整清单（阶段 + 每个子代理一项），全留，只砍掉大字段。"""
     if not isinstance(value, list):
         return None
-    return [{key: (val[:120] if isinstance(val, str) else val) for key, val in item.items()
-             if isinstance(val, (str, int, float, bool)) or val is None}
-            for item in value[:30] if isinstance(item, dict)]
+    out = []
+    for item in value[:WORKFLOW_MAX_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        out.append({key: (item[key][:160] if isinstance(item[key], str) else item[key])
+                    for key in _WORKFLOW_KEYS
+                    if key in item and (isinstance(item[key], (str, int, float, bool)) or item[key] is None)})
+    return out
+
+
+def workflow_counts(items: list) -> dict:
+    """完整清单 → 面板底部那一行要的数：几个子代理、做完几个、出错几个、在跑几个、现在在哪个阶段。
+
+    当前阶段：还有子代理没做完的阶段里最靠后的那个；都做完了就取最后一个有子代理的阶段。
+    """
+    phases = [str(item.get("title") or "") for item in items if item.get("type") == "workflow_phase"]
+    agents = [item for item in items if item.get("type") == "workflow_agent"]
+    counts = {"total": len(agents),
+              "done": sum(1 for item in agents if item.get("state") == "done"),
+              "error": sum(1 for item in agents if item.get("state") == "error"),
+              "running": sum(1 for item in agents if item.get("state") in _AGENT_RUNNING)}
+    open_ = [item for item in agents if item.get("state") not in ("done", "error")]
+    pool = open_ or agents
+    if pool:
+        last = max(pool, key=lambda item: (int(item.get("phaseIndex") or 0), int(item.get("index") or 0)))
+        counts["phase"] = str(last.get("phaseTitle") or "")
+    if phases:
+        counts["phases"] = phases
+    return counts
+
+
+def workflow_path(name: str, task_id: str) -> Path:
+    """一个工作流最新的完整进度：sideagents/<名字>/workflows/<任务编号>.json，每次覆盖。"""
+    safe = "".join(ch for ch in task_id if ch.isalnum() or ch in "-_") or "unknown"
+    return agent_dir(name) / "workflows" / f"{safe}.json"
 
 
 def task_event(event: dict) -> dict | None:
@@ -262,6 +303,8 @@ def task_event(event: dict) -> dict | None:
                           if isinstance(usage.get(key), (int, float))}
     progress = _clip_progress(event.get("workflow_progress"))
     if progress:
+        # 事件文件里只记几个数；完整清单由写事件的人另存一份（见 workflow_path），不往事件文件里追加
+        entry["workflow_counts"] = workflow_counts(progress)
         entry["workflow_progress"] = progress
     return entry
 
@@ -292,6 +335,7 @@ def _oneshot_name(account: str) -> str:
 
 # 一个 sideagent 一个文件夹（见 docs/specs/sideagent-mn.md）：
 #   sideagents/<名字>/state.json、events.jsonl、progress、summary.log、result.json、log、lock
+#   sideagents/<名字>/workflows/<任务编号>.json  工作流最新的完整进度（每次覆盖）
 #   sideagents/<名字>/run/sock、run/live   只在跑的时候有，停了整个 run/ 删掉
 # 谁用着它不记在这里，记在主会话自己的名单 ~/.cca/sessions/<会话编号>.json（见 roster.py）。
 
@@ -908,6 +952,10 @@ class _Collector:
         if event.get("type") == "error":
             self.error = str(event.get("message") or "sideagent报错")
             return False
+        if event.get("type") == "cca_held":
+            # 前一轮的结果被压下了（后台还有任务）：那一轮说的话不算最终回复，重新收
+            self.text = ""
+            return False
         if event.get("type") == "stream_event":
             inner = event.get("event") or {}
             delta = inner.get("delta") or {}
@@ -931,7 +979,7 @@ def _summary(collector: _Collector) -> dict:
             "interrupted": bool(result.get("cca_interrupted"))}
 
 
-def ask(name: str, text: str, timeout: float = SEND_TIMEOUT, *,  # noqa: PLR0913 - 都是可选开关
+def ask(name: str, text: str, timeout: float | None = SEND_TIMEOUT, *,  # noqa: PLR0913 - 都是可选开关
         notify: bool = False, job: str = "", interject: bool = False, keep: bool = True) -> dict:
     """发一句并等它完成，返回 {text, turns, duration_ms, interrupted}；错误抛 SideagentError。
 
@@ -942,9 +990,10 @@ def ask(name: str, text: str, timeout: float = SEND_TIMEOUT, *,  # noqa: PLR0913
     `interject` 为真：它正忙就插话进当前这一轮，马上返回 {"merged": True, "merged_into": 任务编号}；
     它闲着就和普通的一样开一轮、等结果。
     `keep` 为假：sideagent 干完这一轮自己退出（调用方半路没了也照样退）。
+    `timeout` 为 None：不限时，一直等到结果或连接断开（后台派活用：sideagent 结束时一定交结果或报错）。
     """
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
+    sock.settimeout(SOCKET_TIMEOUT if timeout is None else timeout)
     try:
         sock.connect(str(_socket_path(name)))
     except OSError as exc:
@@ -954,6 +1003,7 @@ def ask(name: str, text: str, timeout: float = SEND_TIMEOUT, *,  # noqa: PLR0913
         request = json.dumps({"text": text, "notify": notify, "job": job,
                               "interject": interject, "keep": keep}, ensure_ascii=False) + "\n"
         sock.sendall(request.encode("utf-8"))
+        sock.settimeout(timeout)
         collector = _Collector()
         buffer = b""
         while True:

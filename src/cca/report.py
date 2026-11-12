@@ -527,12 +527,23 @@ def _list_options(args: list) -> tuple:
     """
     rest, flags = parse_flags(args, bool_flags=("--wide", "--json", "--cached", "--refresh", "--active"),
                               usage=LIST_USAGE)
-    known = set(discover_profiles())
-    unknown = [n for n in rest if n not in known]
-    if unknown:
-        die(f"没有这个号: {' '.join(unknown)}；cca ls 看看有哪些号")
     return (bool(flags.get("--json")), bool(flags.get("--wide")), bool(flags.get("--cached")),
-            bool(flags.get("--refresh")), list(rest), bool(flags.get("--active")))
+            bool(flags.get("--refresh")), _pick_profiles(rest), bool(flags.get("--active")))
+
+
+def _pick_profiles(words: list) -> list:
+    """位置参数里的号：写全名，或者带通配符（`cca ls 'b*'` 只看 b 开头的号）。按号的原有顺序、去重。"""
+    import fnmatch  # noqa: PLC0415
+
+    known = discover_profiles()
+    picked: list = []
+    for word in words:
+        hits = [n for n in known if fnmatch.fnmatchcase(n, word)] if any(c in word for c in "*?[") else \
+            ([word] if word in known else [])
+        if not hits:
+            die(f"没有这个号: {word}；cca ls 看看有哪些号（可以写通配符，如 cca ls 'b*'）")
+        picked += [n for n in hits if n not in picked]
+    return [n for n in known if n in picked]
 
 
 ACTIVE_STATUSES = ("active", "trialing")
