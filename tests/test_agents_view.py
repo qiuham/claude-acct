@@ -115,14 +115,17 @@ class OrderAndScopeTest(ViewCase):
         out = self.build(rows)["rows"]
         self.assertEqual([(r["session_id"], r["state"]) for r in out], [("i1", "quota"), ("w1", "working")])
 
-    def test_idle_and_blocked_without_pid_count_as_alive(self):
+    def test_blocked_or_idle_without_a_process_is_history(self):
+        """没有 pid 的 blocked / idle 是早没进程的旧登记（如 4 天前的 Login expired）：不算活着，过期就藏起来；
+        有进程的 blocked 照样算活着、排最前。"""
         rows = [row("001", "i1", "idle", started=NOW - 30 * DAY),
                 row("001", "b1", "blocked", started=NOW - 30 * DAY),
+                row("001", "b2", "blocked", pid=7, started=NOW - 30 * DAY),
                 row("001", "d1", "done", started=NOW - 30 * DAY)]
         view = self.build(rows)
-        self.assertEqual([r["session_id"] for r in view["rows"]], ["b1", "i1"])
-        self.assertTrue(all(r["alive"] for r in view["rows"]))
-        self.assertEqual(view["hidden"], 1)
+        self.assertEqual([r["session_id"] for r in view["rows"]], ["b2"])
+        self.assertTrue(view["rows"][0]["alive"])
+        self.assertEqual(view["hidden"], 3)
 
     def test_default_scope_vs_all(self):
         rows = [row("001", "live", "idle", pid=1, started=NOW - 30 * DAY),
@@ -231,12 +234,34 @@ if __name__ == "__main__":
 
 
 class MovedFromTest(unittest.TestCase):
-    def test_recent_live_copy_with_stopped_older_copy_is_marked(self):
-        now_ms = time.time() * 1000
-        old = {"account": "b005", "state": "stopped", "started_at": now_ms - 3600_000, "pid": 0}
-        new = {"account": "b004", "state": "working", "started_at": now_ms - 600_000, "pid": 123}
-        stray = {"account": "ds", "state": "done", "started_at": now_ms - 7200_000, "pid": 0}
-        self.assertEqual(agents_view._moved_from(new, [new, old, stray]), "b005")  # noqa: SLF001
-        self.assertEqual(agents_view._moved_from(new, [new, stray]), "")  # noqa: SLF001
-        long_ago = {**new, "started_at": now_ms - 7 * 3600_000}
-        self.assertEqual(agents_view._moved_from(long_ago, [long_ago, old]), "")  # noqa: SLF001
+    """「← 旧号」读 cca 自己的换号记录：搬走后源号面板里的旧条目会被清掉，登记表里看不出来源。"""
+
+    def test_recent_move_to_current_account_is_marked(self):
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "moves.jsonl"
+            path.write_text("\n".join(json.dumps(x) for x in (
+                {"at": now - 7 * 3600, "session": "s-old", "from": "b001", "to": "b002"},   # 太久以前
+                {"at": now - 600, "session": "s-1", "from": "b005", "to": "b002"},
+                {"at": now - 300, "session": "s-1", "from": "b002", "to": "b004"},          # 最后一次为准
+                {"at": now - 60, "session": "s-2", "from": "006", "to": "001"},
+            )) + "\nbad line\n", encoding="utf-8")
+            with mock.patch("cca.paths.moves_file", return_value=path):
+                moves = agents_view.recent_moves(now)
+        self.assertNotIn("s-old", moves)
+        self.assertEqual(agents_view._moved_from({"session_id": "s-1", "account": "b004"}, moves), "b002")  # noqa: SLF001
+        # 记录说搬到了 001，但它现在不在 001（之后又被人挪走了）：不标，免得标错
+        self.assertEqual(agents_view._moved_from({"session_id": "s-2", "account": "b003"}, moves), "")  # noqa: SLF001
+
+    def test_record_move_appends_and_trims(self):
+        from cca.account import lifecycle  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "moves.jsonl"
+            with mock.patch("cca.paths.moves_file", return_value=path), \
+                 mock.patch.object(lifecycle, "MOVES_KEEP_LINES", 2):
+                for index in range(6):
+                    lifecycle.record_move(f"s-{index}", "b002", "b004")
+            lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertLessEqual(len(lines), 4)
+        self.assertEqual(json.loads(lines[-1])["session"], "s-5")

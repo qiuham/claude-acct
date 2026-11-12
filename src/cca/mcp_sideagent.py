@@ -264,7 +264,7 @@ def _call(request_id, params: dict) -> dict:
     complaints = io.StringIO()
     try:
         with redirect_stderr(complaints):
-            text = TOOL_HANDLERS[name](arguments)
+            text = TOOL_HANDLERS[name](_named_by_label(name, arguments))
     except KeyError:
         return _error(request_id, -32602, f"不存在的工具: {name}")
     except SystemExit:
@@ -275,6 +275,23 @@ def _call(request_id, params: dict) -> dict:
     except Exception as exc:  # noqa: BLE001 - MCP 层兜住，别把会话带崩
         return _content(request_id, f"{type(exc).__name__}: {exc}", is_error=True)
     return _content(request_id, text)
+
+
+# 这几个工具的 name / account 可以写面板上看到的名字（例如 ham-fa），不只是记录名（005#bg-13ca09b7）
+_NAME_ARGS = {"sideagent_release": "name", "sideagent_stop": "account", "sideagent_status": "account",
+              "sideagent_result": "account", "sideagent_interrupt": "account", "sideagent_send": "account"}
+
+
+def _named_by_label(tool: str, arguments: dict) -> dict:
+    """面板名字换成记录名：只在本会话名单里找，且只有一条对上才换；别的原样返回。"""
+    key = _NAME_ARGS.get(tool)
+    value = str(arguments.get(key) or "").strip() if key else ""
+    if not value or "#" in value or value in sideagent.agent_names():
+        return arguments
+    mine = jobs.my_roster()
+    hits = [name for name, entry in mine.items()
+            if value in (str(entry.get("label") or ""), str(sideagent._read_state(name).get("label") or ""))]  # noqa: SLF001
+    return {**arguments, key: hits[0]} if len(hits) == 1 else arguments
 
 
 def _owned(name: str, mine: dict | None = None) -> bool:

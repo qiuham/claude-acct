@@ -158,17 +158,17 @@ def fetch_subscription_live(name: str) -> tuple:
     result, reason = _run_claude(name, ["auth", "status", "--json"], timeout=15)
     if result is None:
         return {}, reason
-    if result.returncode != 0:
-        return {}, f"退出码 {result.returncode}"
+    # 没登录（或登录失效）时 claude 退出码是 1，但照样打出 {"loggedIn": false, ...}：先看输出，
+    # 不能一见非 0 就当「取不到」——那样会一直沿用几天前缓存里的「有效」（11-12 002/004 就是这样）。
     try:
         data = json.loads(result.stdout)
     except ValueError:
-        return {}, "输出不是 JSON"
+        return {}, f"退出码 {result.returncode}" if result.returncode else "输出不是 JSON"
     if not isinstance(data, dict):
         return {}, "输出不是对象"
     sub = {
         "type": str(data.get("subscriptionType") or ""),
-        "status": "active" if data.get("loggedIn") else "expired",
+        "status": "active" if data.get("loggedIn") else "logged_out",
         "source": "live",
     }
     return (sub, "") if _has_subscription_data(sub) else (sub, "没有订阅字段")

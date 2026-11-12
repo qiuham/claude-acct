@@ -1,6 +1,7 @@
 import { displayWidth } from './text-width.js'
 export { displayWidth }
 import { onTakeoverCall } from './takeover-picker.js'
+import { withPeerHint } from './peer-hint.js'
 import { QUOTA_FIRST_MS, QUOTA_POLL_MS, parseQuota, withHint } from './quota-hint.js'
 import { COMMAND as CCA_COMMAND, ccaCompletions, runCca } from './cca-command.js'
 import { forgetList, hasList, onListArrow, onListFocus, onListMessage, renderList } from './list-pane.js'
@@ -1362,6 +1363,36 @@ export function permissionBox($, el, name, permission) {
   })
 }
 
+// 详情页顶上的那一块：有“请确认”先画它；接管的会话画“拿掉”按钮；别的不画
+function paneExtra($, el, { name, entry, paneId }) {
+  if (entry.permission) return permissionBox($, el, name, entry.permission)
+  if (entry.attached) return releaseBox($, el, name, paneId)
+  return null
+}
+
+// 接管的会话：详情页顶上一个“拿掉”按钮，只从本会话的面板拿掉，会话本身不停（热键 x）
+export function releaseBox($, el, name, paneId) {
+  const { Box, Text, Button } = el
+  const press = async () => {
+    try {
+      await $.process.run(['cca', 'sideagent', 'release', name, mySession], { timeoutMs: 10000 })
+    } catch {
+      // 拿不掉（已经被拿掉了）：下一次刷新会更新
+    }
+    delete byName[name]
+    await closePane($, paneId)
+    $.ui.invalidate('ui.render')
+  }
+  return Box({
+    flexDirection: 'row',
+    children: [
+      Button({ key: 'release-' + name, label: '从面板拿掉 (x)', hotkey: 'x', onPress: press,
+        children: [Text({ children: ['[ 从面板拿掉 x ]'], dimColor: true })] }),
+      Text({ children: ['  会话本身不停'], dimColor: true }),
+    ],
+  })
+}
+
 // 已经按过的请求编号：同步线程还没把它清掉前，别再画按钮
 const answered = new Set()
 // 已经弹过提示的请求编号：每条只提示一次
@@ -1819,7 +1850,7 @@ async function renderPeerPane($, e, next) {
       bodyColumns: e.props.bodyColumns,
       onBack: () => openPeerPane($, name),
       summary: isAgent ? '' : headerSummary(entry, status), meta: isAgent ? '' : headerMeta(name, entry),
-      extra: !isAgent && entry.permission ? permissionBox($, $.ui.resolve(e), name, entry.permission) : null,
+      extra: isAgent ? null : paneExtra($, $.ui.resolve(e), { name, entry, paneId }),
     })
     const { iconBox, paneWidth, bodyWidth, body, line } = paneStyles($.ui.resolve(e), e.props.bodyColumns)
 
@@ -2341,7 +2372,8 @@ export function register(on) {
 
   // 子代理派 sideagent：记下派活的子代理；它发回来的消息转给那个子代理，不进主对话
   // 模型调 sideagent_takeover 却没给会话：打开挑选框；子代理派 sideagent：记下派活的子代理
-  on('tool.call', async ($, e, next) => withHint(
-    await onTakeoverCall($, e, (call) => onSideagentCall($, call, next)), quotaHint, quotaHintsGiven, e))
+  // 原生 SendMessage 发不到：提醒模型对方多半在别的号上，改用 sideagent_send {session}（见 peer-hint.js）
+  on('tool.call', async ($, e, next) => withHint(withPeerHint(
+    await onTakeoverCall($, e, (call) => onSideagentCall($, call, next)), e), quotaHint, quotaHintsGiven, e))
   on('session.receive', onReceive)
 }

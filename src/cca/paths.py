@@ -43,6 +43,10 @@ def default_settings_file() -> Path:
     """新号播种用的默认 settings.json：不属于任何账号，可以直接编辑。"""
     return state_dir() / "defaults" / "settings.json"
 
+def moves_file() -> Path:
+    """换号记录（一行一条 {at, session, from, to}）：cca agents 用它标「← 旧号」。"""
+    return state_dir() / "moves.jsonl"
+
 def stopped_bg_file() -> Path:
     """`cca stop-bg --all` 记下的会话清单，`cca resume-bg` 照它续（换 workspace 用）。"""
     return state_dir() / "stopped-bg.json"

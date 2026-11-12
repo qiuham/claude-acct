@@ -658,7 +658,9 @@ def target_candidates(rows: list, decision: Decision, move: dict | None, limits:
     from cca.session import quota_hint  # noqa: PLC0415
 
     ranked = quota_hint.ranked_targets(rows, decision.account, limits=limits, shares=shares_sessions, now=now)
-    names = [row["profile"] for row in ranked]
+    # 这条会话之前搬进去失败过的号不再试（例如在那个号上总被 CC 复制成副本）：下一轮换别的号
+    bad = set((read_intents()["fails"].get(decision.session) or {}).get("bad") or [])
+    names = [row["profile"] for row in ranked if row["profile"] not in bad]
     first = []
     if move and move.get("target") in names:
         first = [move["target"]]
@@ -814,7 +816,10 @@ def execute(decision: Decision, *, now: float | None = None, outcome: dict | Non
                 log(f"没搬：{short} 在 {target} 上已经有一份在跑，当重复会话，交给下一轮处理（不计失败）")
                 outcome["abandoned"] = True
             else:
-                log(f"没搬成：{short} {source} → {target}（冷却 {COOLDOWN_SECONDS // 60} 分钟）")
+                # 不在这一轮接着试下一个号：失败时会话已被续回源号并收到一句话、开始了新的一轮，
+                # 马上再搬就会打断它。记下这个号，下一轮（它这一轮结束时）换别的号。
+                outcome["failed_target"] = target
+                log(f"没搬成：{short} {source} → {target}（冷却 {COOLDOWN_SECONDS // 60} 分钟，下次换别的号）")
             return False
         log(f"已搬：{source} → {target} {short}（{decision.reason}）")
         notify_move(source, target, title)
@@ -905,17 +910,22 @@ def _forget_intents(full: str) -> None:
             _write_intents(data)
 
 
-def record_failure(account: str, full: str, now: float) -> float:
-    """搬失败一次：累计次数写进 watchdog.json，冷却翻倍；到 MAX_FAILS 次不再自动搬（冷却到意图作废为止）。返回冷却到什么时候。"""
+def record_failure(account: str, full: str, now: float, *, target: str = "") -> float:
+    """搬失败一次：累计次数写进 watchdog.json，冷却翻倍；到 MAX_FAILS 次不再自动搬（冷却到意图作废为止）。返回冷却到什么时候。
+
+    target 是这次搬不进去的号：记进 bad，之后 target_candidates 不再挑它。
+    """
     with _state_lock():
         data = read_intents()
-        count = int((data["fails"].get(full) or {}).get("n") or 0) + 1
+        prior = data["fails"].get(full) or {}
+        count = int(prior.get("n") or 0) + 1
+        bad = sorted({*(prior.get("bad") or []), *([target] if target else [])})
         if count >= MAX_FAILS:
             until = now + MOVE_TTL_SECONDS
             log(f"{full[:8]} 累计搬失败 {count} 次，不再自动搬（要搬请人手动 cca handoff）")
         else:
             until = now + min(COOLDOWN_SECONDS * 2 ** (count - 1), COOLDOWN_MAX_SECONDS)
-        data["fails"][full] = {"account": account, "n": count, "until": until}
+        data["fails"][full] = {"account": account, "n": count, "until": until, "bad": bad}
         _write_intents(data)
     return until
 
@@ -1005,7 +1015,8 @@ class Loop:
         elif outcome.get("abandoned"):
             self.cooldown[decision.session] = now + ARMED_POLL * SETTLED_COUNT   # 条件变了：下一整轮再判断
         else:
-            self.cooldown[decision.session] = record_failure(decision.account, decision.session, now)
+            self.cooldown[decision.session] = record_failure(decision.account, decision.session, now,
+                                                             target=outcome.get("failed_target", ""))
         return True
 
     # -- 两秒一次，只复查「这一轮结束就搬」的那几条

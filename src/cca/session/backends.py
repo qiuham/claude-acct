@@ -130,7 +130,9 @@ class TakenOverBackend(Backend):
 
     def status(self, name: str) -> dict:
         state = takeover.sync_one(name)
-        word = {"busy": "running", "waiting": "blocked", "idle": "idle"}.get(str(state.get("status")), "ended")
+        # shell：会话停在终端里（例如刚跑完 ! 命令），人没在等它，按空闲算，不是结束
+        word = {"busy": "running", "waiting": "blocked", "idle": "idle", "shell": "idle"}.get(
+            str(state.get("status")), "ended")
         return {"name": name, "kind": self.kind, "account": state.get("account"),
                 "session_id": state.get("session_id"), "label": state.get("label"), "state": word,
                 "waiting_for": state.get("waiting_for") or "", "model": state.get("model") or "",

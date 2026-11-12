@@ -30,6 +30,7 @@ import uuid
 from contextlib import suppress
 from pathlib import Path
 
+from cca.account.model import discover_profiles
 from cca.config import (
     TAKEN_BY_ASK_CHARS,
     TAKEOVER_CARD_ROUNDS,
@@ -48,7 +49,7 @@ FIRST_READ_BYTES = 256_000
 SYNC_READ_BYTES = 2_000_000
 WAKE_TIMEOUT = 30
 # 唤醒后等消息套接字出现最多多久
-SOCKET_WAIT = 10
+WAKE_DELIVER_WAIT = 30   # 唤醒后最多等多久把话投进去
 BG_PREFIX = "bg-"
 
 # 完整会话编号的长度（UUID 带连字符）；短了 claude --resume 会复制出新会话
@@ -96,7 +97,24 @@ def _agents(account: str) -> list:
 
 
 def registry_entry(account: str, session_id: str) -> dict:
-    """原号登记表里这个会话现在的条目（在跑才有）：status、waitingFor、套接字都在这。"""
+    """这个会话现在的登记条目（在跑才有）：status、waitingFor、套接字都在这。
+
+    先看原号；原号没有，就到所有号里找。会话可能换了号重新拉起来（例如机器重启后在别的号上
+    --resume），这时只认原号会把它当成已结束。找到的号写在 "account" 键里。
+    """
+    entry = _registry_entry_in(account, session_id) if account else {}
+    if entry:
+        return {**entry, "account": account}
+    for other in discover_profiles():
+        if other == account:
+            continue
+        entry = _registry_entry_in(other, session_id)
+        if entry:
+            return {**entry, "account": other}
+    return {}
+
+
+def _registry_entry_in(account: str, session_id: str) -> dict:
     folder = profile_dir(account) / "sessions"
     if not folder.is_dir():
         return {}
@@ -425,6 +443,36 @@ def find(key: str, rows: list) -> list:
     return [row for row in rows if row["session_id"].startswith(key) or row["id"].startswith(key)]
 
 
+def narrow_by_name(hits: list) -> tuple[list, str]:
+    """按名字对上了几段不同的对话时，挑出现在要找的那段：(这段对话的全部登记, 还是分不清时的说明)。
+
+    同名的常常只有一段在跑，其余是早就停了的旧会话或残留登记（11-12 发给 train-h004 时，
+    在跑的 bb183830 旁边还有一段从没活过的同名 e77b8edb）。所以：只有一段在跑就用它；
+    都没在跑就用最近有动静的那段；好几段都在跑才真的分不清。
+    """
+    by_session: dict = {}
+    for row in hits:
+        by_session.setdefault(row["session_id"], []).append(row)
+    if len(by_session) <= 1:
+        return hits, ""
+    live = [rows for rows in by_session.values() if any(row.get("running") for row in rows)]
+    if len(live) == 1:
+        return live[0], ""
+    if not live:
+        newest = max(by_session.values(), key=lambda rows: _last_activity(rows[0]["session_id"]))
+        return newest, ""
+    names = "、".join(f"{rows[0]['account']}/{rows[0]['id']}({rows[0]['name']})" for rows in live[:5])
+    return [], f"对上了好几段都在跑的会话：{names}；写完整编号"
+
+
+def _last_activity(session_id: str) -> float:
+    path = transcript(session_id)
+    try:
+        return path.stat().st_mtime if path is not None else 0.0
+    except OSError:
+        return 0.0
+
+
 def _from_transcript(key: str, account: str) -> dict:
     """agents 列表里没有（普通会话已结束）：按对话记录文件找，号用调用方给的。"""
     hits = sorted(PROJECTS_DIR.glob(f"*/{key}*.jsonl"))
@@ -571,9 +619,9 @@ def takeover(key: str, owner: dict, *, account: str = "") -> dict:
         hits = [row] if row else []
     if not hits:
         return {"error": f"找不到会话 {key}；不带参数调 sideagent_takeover 看能接管哪些"}
-    if len({row["session_id"] for row in hits}) > 1:
-        names = "、".join(f"{row['account']}/{row['id']}({row['name']})" for row in hits[:5])
-        return {"error": f"{key} 对上了好几个：{names}；写完整编号"}
+    hits, ambiguous = narrow_by_name(hits)
+    if ambiguous:
+        return {"error": f"{key} {ambiguous}"}
     # 同一会话在几个号上都有登记（handoff 留下的 stopped 旧登记等）：接它现在挂的那个号
     row = min(hits, key=_registration_rank)
     spawner = _spawned_owner(row["session_id"])
@@ -587,7 +635,8 @@ def takeover(key: str, owner: dict, *, account: str = "") -> dict:
             return {"error": f"{row['account']}/{row['id']} 接着跑失败：{error}"}
         woke = True
         entry = registry_entry(row["account"], row["session_id"])
-    name = record_name(row["account"], row["session_id"], str(entry.get("jobId") or row["id"]))
+    name = (_attached_name_for(row["session_id"])
+            or record_name(row["account"], row["session_id"], str(entry.get("jobId") or row["id"])))
     path = transcript(row["session_id"])
     label = str(entry.get("name") or row["name"] or session_name(path))
     with STATE_LOCK:
@@ -615,6 +664,15 @@ def takeover(key: str, owner: dict, *, account: str = "") -> dict:
     return {"name": name, "account": row["account"], "session_id": row["session_id"],
             "label": label, "woke": woke,
             "card": card(row["session_id"], account=row["account"], title=label, state=str(row.get("state") or ""))}
+
+
+def _attached_name_for(session_id: str) -> str:
+    """这个会话已经有接管记录（可能记在旧号下，例如换号重启前接管的）：复用它，面板上不出两条。"""
+    for other in sideagent.agent_names(include_finished=True):
+        state = sideagent._read_state(other)  # noqa: SLF001
+        if roster.kind_of(state) == roster.ATTACHED and state.get("session_id") == session_id:
+            return other
+    return ""
 
 
 def release(name: str, session: str) -> int:
@@ -683,19 +741,10 @@ def message(key: str, text: str, sender: dict, *, account: str = "", usable=None
     error = _wake(row)
     if error:
         return {"error": f"{row['account']}/{session_id[:8]} 唤醒失败：{error}"}
-    error = deliver(_wait_socket(row["account"], session_id), text, sender)
+    # 刚唤醒的会话：登记先出来、套接字晚一点开始监听，会话还可能在处理 /rename——按期限重试着投
+    error = deliver_after_resume(row["account"], session_id, text, sender=sender, wait=WAKE_DELIVER_WAIT)
     return {"error": error} if error else {
         "account": row["account"], "session_id": session_id, "label": label, "woke": True}
-
-
-def _wait_socket(account: str, session_id: str, seconds: float = SOCKET_WAIT) -> dict:
-    """刚唤醒的会话：登记表条目先出来，消息套接字可能晚一点；等到有套接字为止。"""
-    deadline = time.time() + seconds
-    entry = registry_entry(account, session_id)
-    while not entry.get("messagingSocketPath") and time.time() < deadline:
-        time.sleep(0.5)
-        entry = registry_entry(account, session_id)
-    return entry
 
 
 def _locate(key: str, fallback: str, *, account: str) -> tuple:
@@ -703,10 +752,9 @@ def _locate(key: str, fallback: str, *, account: str) -> tuple:
 
     哪个号都没登记的（已经退出的普通会话）按对话记录找，号先记成 fallback。
     """
-    hits = find(key, candidates([account] if account else None))
-    if len({row["session_id"] for row in hits}) > 1:
-        names = "、".join(f"{row['account']}/{row['id']}({row['name']})" for row in hits[:5])
-        return [], f"{key} 对上了好几个：{names}；写完整编号"
+    hits, ambiguous = narrow_by_name(find(key, candidates([account] if account else None)))
+    if ambiguous:
+        return [], f"{key} {ambiguous}"
     if not hits:
         row = _from_transcript(key, fallback)
         hits = [row] if row else []
@@ -1019,6 +1067,9 @@ def _sync_one(name: str) -> dict:
     says = [e for e in events if e["kind"] == "say" and not e.get("parent")]
     if says:
         state["last_say"] = says[-1]
+    if entry.get("account") and entry["account"] != state.get("account"):
+        # 会话换了号重新拉起来：面板跟到新号上（名字、进程号也在下面跟着换）
+        state["account"] = entry["account"]
     state.update({
         "offset": offset, "busy": busy, "status": status or "ended",
         "waiting_for": str(entry.get("waitingFor") or "") if status == "waiting" else "",

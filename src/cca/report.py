@@ -31,6 +31,7 @@ from cca.api.usage import (
     live_usage,
     local_subscription,
     profile_subscription,
+    read_subscription_cache,
     usage_roominess,
     usage_snapshot,
 )
@@ -524,14 +525,68 @@ def _list_options(args: list) -> tuple:
     位置参数 = 号名（`cca ls 006 gpt`），只刷这几个号的实时额度、只画这几行；不认识的
     名字直接报错（以前会落到"多余参数"上，看不出是号名打错了）。
     """
-    rest, flags = parse_flags(args, bool_flags=("--wide", "--json", "--cached", "--refresh"),
+    rest, flags = parse_flags(args, bool_flags=("--wide", "--json", "--cached", "--refresh", "--active"),
                               usage=LIST_USAGE)
     known = set(discover_profiles())
     unknown = [n for n in rest if n not in known]
     if unknown:
         die(f"没有这个号: {' '.join(unknown)}；cca ls 看看有哪些号")
     return (bool(flags.get("--json")), bool(flags.get("--wide")), bool(flags.get("--cached")),
-            bool(flags.get("--refresh")), list(rest))
+            bool(flags.get("--refresh")), list(rest), bool(flags.get("--active")))
+
+
+ACTIVE_STATUSES = ("active", "trialing")
+
+
+def subscription_problem(row: dict) -> str:
+    """这个号的订阅能不能用：能用返回空串，否则返回归哪一类（--active 时被藏起来的原因）。
+
+    - API 号没有订阅；
+    - 取到了订阅（实时或缓存）：状态是有效 / 试用，或者状态为空（正常在用的订阅 subscription_status
+      常常是 null）都算能用；已取消、过期、欠费、暂停算无效；
+    - 只有本地凭据里的套餐类型、没取到过实时订阅（没登录、取失败）：状态未知。
+    """
+    if row.get("kind") == "api":
+        return "API 号"
+    sub = row.get("subscription") or {}
+    status = str(sub.get("status") or "")
+    if not row.get("logged_in") or status == "logged_out":
+        return "未登录"
+    if sub.get("source") not in ("live", "cache"):
+        return "状态未知"
+    if not status or status in ACTIVE_STATUSES:
+        return ""
+    return "订阅无效"
+
+
+CACHED_SUBSCRIPTION_MAX_AGE = 86400   # --cached 时，订阅缓存旧过这个就不信（当「状态未知」）
+
+
+def _with_cached_subscriptions(rows: list) -> list:
+    """--cached 时没去取实时订阅：用一天内取到的缓存补上；更旧的不用（几天前的「有效」会骗人）。"""
+    cache = read_subscription_cache()
+    now = time.time()
+    for row in rows:
+        entry = cache.get(row["profile"])
+        if row.get("kind") == "api" or not isinstance(entry, dict):
+            continue
+        if now - float(entry.get("fetched_at") or 0) > CACHED_SUBSCRIPTION_MAX_AGE:
+            continue
+        if (row.get("subscription") or {}).get("source") not in ("live", "cache"):
+            row["subscription"] = {**(row.get("subscription") or {}), **entry, "source": "cache"}
+    return rows
+
+
+def keep_active(rows: list, *, cached_only: bool = False) -> tuple[list, dict]:
+    """只留订阅能用的号；返回 (留下的行, {原因: [被藏的号]})。"""
+    kept, hidden = [], {}
+    for row in (_with_cached_subscriptions(rows) if cached_only else rows):
+        why = subscription_problem(row)
+        if why:
+            hidden.setdefault(why, []).append(row["profile"])
+        else:
+            kept.append(row)
+    return kept, hidden
 
 def _list_targets(names: list, *, cached_only: bool) -> list:
     """要实时拉额度的号：订阅号且已登录；--cached 时一个都不拉。"""
@@ -627,8 +682,10 @@ def _list_cells(row: dict, *, wide: bool, countdown: bool = True) -> tuple:
         rate_tier_label(row["rate_tier"], row.get("org_type", ""), row.get("seat_tier", "")) if row["kind"] != "api" else "-")
     sub_status = SUBSCRIPTION_STATUS.get(str(sub.get("status") or ""),
                                          str(sub.get("status") or ""))
+    if row["kind"] != "api" and not row.get("logged_in"):
+        sub, sub_status = {"status": "logged_out"}, SUBSCRIPTION_STATUS["logged_out"]   # 没有凭据：没登录
     sub_style = ("green" if sub.get("status") == "active"
-                 else "red" if sub.get("status") in ("canceled", "expired", "past_due")
+                 else "red" if sub.get("status") in ("canceled", "expired", "past_due", "logged_out")
                  else "dim" if not sub_status else "")
     cells["substate"] = (_plain(sub_status or "-", style=sub_style) if sub_style
                          else _plain(sub_status or "-"))
@@ -726,11 +783,14 @@ def _fit_list_columns(cols: list, fixed: dict, width: int) -> tuple:
         email_width = max(EMAIL_MIN_WIDTH, min(EMAIL_MAX_WIDTH, spare))
     return cols, include_email, email_width
 
-def _print_list_json(rows: list, roomiest) -> None:
-    """--json 输出（机器可读）。"""
+def _print_list_json(rows: list, roomiest, *, hidden: dict | None = None) -> None:
+    """--json 输出（机器可读）。--active 时多一个 hidden：{原因: [被藏的号]}。"""
+    payload = {"now": format_clock(time.time()), "roomiest": roomiest, "profiles": rows}
+    if hidden is not None:
+        payload["hidden"] = hidden
     print(  # noqa: T201 - CLI JSON 输出边界
         json.dumps(
-            {"now": format_clock(time.time()), "roomiest": roomiest, "profiles": rows},
+            payload,
             ensure_ascii=False,
             indent=2,
         )
@@ -803,7 +863,7 @@ def cmd_list(args: list) -> int:
     就**静默裁掉尾列**（实测 72~96 列下 `ls` 的登录/后台整列消失过）。窄的时候按
     "邮箱先省略 → 最空闲列让位 → 邮箱整列让位"的顺序牺牲，绝不裁列。
     """
-    as_json, wide, cached_only, refresh, only = _list_options(args)
+    as_json, wide, cached_only, refresh, only, active = _list_options(args)
     names = only or discover_profiles()
     if not names:
         if as_json:
@@ -815,14 +875,23 @@ def cmd_list(args: list) -> int:
     # ② 实时额度要打网络（每个号 0.6–1s）。它们互不依赖 —— 逐个等是 1.7s + 1.4s，
     # 并发之后只等最慢的那一个（实测 3.1s → 1.9s；缓存命中时 ~0.4s）。
     rows = list_rows(names, cached_only=cached_only, refresh=refresh)
+    hidden: dict = {}
+    if active:
+        rows, hidden = keep_active(rows, cached_only=cached_only)
     roomiest = _list_roomiest(rows)
     if as_json:
-        _print_list_json(rows, roomiest)
+        _print_list_json(rows, roomiest, hidden=hidden if active else None)
         return 0
 
     console = make_console(width=WIDE_CONSOLE_WIDTH) if wide else make_console()
-    countdown = console.width >= LIST_COUNTDOWN_MIN_WIDTH
-    _render_list_table(rows, _collect_list_cells(rows, wide=wide, countdown=countdown), console)
+    if not rows:
+        console.print(_plain("没有订阅有效的号" if active else "没有号"))
+    else:
+        countdown = console.width >= LIST_COUNTDOWN_MIN_WIDTH
+        _render_list_table(rows, _collect_list_cells(rows, wide=wide, countdown=countdown), console)
+    if hidden:
+        parts = "；".join(f"{why} {'、'.join(names)}" for why, names in hidden.items())
+        console.print(_plain(f"--active 藏起来的：{parts}（去掉 --active 看全部）", style="dim"))
     return 0
 
 def _sessions_payload(items: list, live: dict) -> list:

@@ -490,3 +490,16 @@ class CurrentWithoutTargetTest(unittest.TestCase):
     def test_session_flag_needs_current_or_stay(self):
         with self.assertRaises(SystemExit):
             lifecycle.cmd_handoff(["b005", "b004", "--session=x"])
+
+
+class HintKeyTest(unittest.TestCase):
+    def test_key_is_stable_across_sub_second_jitter(self):
+        """不同数据源算出的重置时刻差零点几秒（…399.9 / …400.1）：去重的 key 要一样，提醒只给一次。"""
+        now = time.time()
+        keys = set()
+        for resets in (now + 3600 - 0.08, now + 3600 + 0.1):
+            rows = [{"profile": "b004", "kind": "oauth", "logged_in": True, "usage": {"windows": {
+                "five_hour": {"percent": 97, "resets_at": resets, "reset_passed": False},
+                "seven_day": {"percent": 20, "resets_at": now + 86400, "reset_passed": False}}}}]
+            keys.add(quota_hint.advise("b004", "sid", rows=rows, shares=lambda _n: True, kind="bg")["key"])
+        self.assertEqual(len(keys), 1)

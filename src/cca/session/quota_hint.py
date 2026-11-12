@@ -212,7 +212,7 @@ def advise(account: str, session: str, *, rows: list, shares, kind: str) -> dict
     else:
         text = _text_for_background(used, target, facts)
     return {"account": account, "session": session, "warn": True, "next_check_seconds": poll, "wake_at": wake_at,
-            "key": f"{account}:{name}:{int(resets or 0)}", "target": (target or {}).get("profile", ""),
+            "key": f"{account}:{name}:{round((resets or 0) / 60)}", "target": (target or {}).get("profile", ""),
             "text": text}
 
 

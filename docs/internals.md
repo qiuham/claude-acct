@@ -144,7 +144,8 @@ busy = 运行中，waiting = 等确认（标黄，写出卡在哪个工具调用
 状态文件（都在 `~/.claude-accounts/`）：
 
 - `wake.json`：待叫醒的条目（`cca wake` 写，watchdog 撞墙又没号可去时也写 `only_if_limited` 条目），格式没变。
-- `watchdog.json`：`{"version": 1, "moves": {会话: {account, target, at}}, "stays": {会话: {account, at, windows: {窗口: 重置时刻}}}}`。
+- `watchdog.json`：`{"version": 1, "moves": {会话: {account, target, at}}, "stays": {会话: {account, at, windows: {窗口: 重置时刻}}}, "fails": {会话: {account, n, until, bad: [搬不进去的号]}}}`；`bad` 里的号下一轮不再挑。
+- `~/.cca/moves.jsonl`：每次换号成功一行 `{at, session, from, to}`（只留最近 2000 条），`cca agents` 的「← 旧号」读它。
   `moves` 是会话里敲 `cca handoff <目标> --current`，`stays` 是 `cca handoff --stay`；同一条会话只留一条，后写的覆盖先写的。
   `stay` 记下命令执行时各窗口的重置时刻，同一时刻（差 120 秒内）有效；窗口都重置了、或会话不在那个号上，就清掉。
 - `watchdog.lock`（单例锁）、`watchdog.state.lock`（`watchdog.json` 的读改写锁）、`watchdog.pid`（只给 status 展示）、

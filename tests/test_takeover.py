@@ -122,6 +122,23 @@ class SyncTest(unittest.TestCase):
         self.assertTrue(state["busy"])
         self.assertEqual((state["status"], state["waiting_for"]), ("waiting", "permission prompt"))
 
+    def test_session_restarted_on_other_account_is_followed(self):
+        # 实测（11-12）：机器重启后会话在别的号上 --resume，进程、名字都换了；原号登记表里没有它。
+        # 面板要跟到新号上，不能当成已结束、名字也不能停在旧的。
+        self.transcript.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
+        other = Path(self.tmp.name) / "other"
+        (other / "sessions").mkdir(parents=True)
+        entry = {"pid": os.getpid(), "sessionId": "s-1", "status": "idle", "name": "ham-fa",
+                 "messagingSocketPath": "/nonexistent.sock"}
+        (other / "sessions" / f"{os.getpid()}.json").write_text(json.dumps(entry), encoding="utf-8")
+        dirs = {"003": self.account_dir, "b005": other}
+        with mock.patch.object(takeover, "profile_dir", side_effect=lambda name: dirs[name]), \
+             mock.patch.object(takeover, "discover_profiles", return_value=["003", "b005"]):
+            state = takeover.sync_one(self.name)
+            self.assertEqual(takeover.registry_entry("003", "s-1")["account"], "b005")
+        self.assertEqual((state["account"], state["label"], state["status"]), ("b005", "ham-fa", "idle"))
+        self.assertEqual(state["pid"], os.getpid())
+
     def test_gone_session_is_ended(self):
         self.transcript.write_text("", encoding="utf-8")
         state = takeover.sync_one(self.name)
@@ -432,7 +449,7 @@ class MessageTest(unittest.TestCase):
              mock.patch.object(takeover, "_wake", side_effect=wake), \
              mock.patch.object(takeover, "deliver", side_effect=deliver), \
              mock.patch.object(takeover, "_spawned_owner", return_value=""), \
-             mock.patch.object(takeover, "SOCKET_WAIT", 0):
+             mock.patch.object(takeover, "WAKE_DELIVER_WAIT", 0):
             result = takeover.message("enhance-pure", "跑 300/500 判官", self.SENDER,
                                       account=account, usable=usable)
         return result, woke, sent
@@ -525,3 +542,94 @@ class TakeoverPicksCurrentAccountTest(unittest.TestCase):
             result = takeover.takeover("enhance-pure", {"session": "me", "account": "005"})
         self.assertEqual(woke, ["b004"])
         self.assertIn("b004/", result["error"])
+
+
+class NarrowByNameTest(unittest.TestCase):
+    """按名字发话：同名的几段对话里挑现在要找的那段（11-12 train-h004 旁边有一段从没活过的同名旧会话）。"""
+
+    @staticmethod
+    def row(session, account, *, running):
+        return {"session_id": session, "id": session[:8], "account": account, "name": "train-h004",
+                "running": running}
+
+    def test_single_live_session_wins_over_stale_namesakes(self):
+        hits = [self.row("e77b8edb-x", "002", running=False), self.row("bb183830-x", "b002", running=True),
+                self.row("bb183830-x", "004", running=False), self.row("e77b8edb-x", "004", running=False)]
+        rows, why = takeover.narrow_by_name(hits)
+        self.assertEqual(why, "")
+        self.assertEqual({r["session_id"] for r in rows}, {"bb183830-x"})
+        self.assertEqual(len(rows), 2)        # 这段对话的全部登记都留着，后面按 _registration_rank 挑号
+
+    def test_none_live_picks_most_recent_activity(self):
+        hits = [self.row("old-1", "002", running=False), self.row("new-2", "004", running=False)]
+        with mock.patch.object(takeover, "_last_activity", side_effect=lambda sid: {"old-1": 1.0, "new-2": 2.0}[sid]):
+            rows, why = takeover.narrow_by_name(hits)
+        self.assertEqual((why, rows[0]["session_id"]), ("", "new-2"))
+
+    def test_several_live_is_still_ambiguous(self):
+        rows, why = takeover.narrow_by_name([self.row("a-1", "002", running=True), self.row("b-2", "004", running=True)])
+        self.assertEqual(rows, [])
+        self.assertIn("都在跑", why)
+
+
+class LabelNameTest(unittest.TestCase):
+    """面板上看到的名字（ham-fa）也能当记录名（005#bg-13ca09b7）用：实测拿掉死条目时写的是面板名字。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.side = Path(self.tmp.name)
+        self.patch = mock.patch.object(sideagent, "SIDEAGENT_DIR", self.side)
+        self.patch.start()
+        self.name = "005#bg-13ca09b7"
+        sideagent._write_state(self.name, {"kind": "attached", "account": "b005", "label": "ham-fa"})  # noqa: SLF001
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def _resolve(self, value, mine):
+        with mock.patch.object(mcp_sideagent.jobs, "my_roster", return_value=mine):
+            return mcp_sideagent._named_by_label("sideagent_release", {"name": value})["name"]  # noqa: SLF001
+
+    def test_current_and_old_label_resolve(self):
+        mine = {self.name: {"kind": "attached", "label": "ham-47"}}
+        self.assertEqual(self._resolve("ham-fa", mine), self.name)
+        self.assertEqual(self._resolve("ham-47", mine), self.name)
+        self.assertEqual(self._resolve(self.name, mine), self.name)
+
+    def test_not_mine_or_unknown_unchanged(self):
+        self.assertEqual(self._resolve("ham-fa", {}), "ham-fa")
+        self.assertEqual(self._resolve("ham-xx", {self.name: {"label": "ham-47"}}), "ham-xx")
+
+
+class ShellStatusTest(unittest.TestCase):
+    def test_shell_is_idle_not_ended(self):
+        from cca.session import backends  # noqa: PLC0415
+        state = {"status": "shell", "account": "b005", "session_id": "s", "label": "ham-fa"}
+        with mock.patch.object(takeover, "sync_one", return_value=state):
+            self.assertEqual(backends.BACKENDS[roster.ATTACHED].status("005#bg-13ca09b7")["state"], "idle")
+
+
+class ReuseAttachedTest(unittest.TestCase):
+    """换号重启前接管过的会话再接管一次：复用旧记录，面板上不出两条（实测 005#bg-… 和 b005#bg-…）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patch = mock.patch.object(sideagent, "SIDEAGENT_DIR", Path(self.tmp.name))
+        self.patch.start()
+        sideagent._write_state("005#bg-13ca09b7", {"kind": "attached", "session_id": "13ca09b7-x"})  # noqa: SLF001
+        sideagent._write_state("ds#abc", {"kind": "spawned", "session_id": "13ca09b7-x"})  # noqa: SLF001
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def test_existing_attached_record_is_reused(self):
+        self.assertEqual(takeover._attached_name_for("13ca09b7-x"), "005#bg-13ca09b7")  # noqa: SLF001
+        self.assertEqual(takeover._attached_name_for("other"), "")  # noqa: SLF001
+
+    def test_release_command_removes_from_roster(self):
+        from cca.session import sideagent_cli  # noqa: PLC0415
+        with mock.patch.object(takeover, "release", return_value=0) as release:
+            self.assertEqual(sideagent_cli._release_command(["005#bg-13ca09b7", "owner"]), 0)  # noqa: SLF001
+        release.assert_called_once_with("005#bg-13ca09b7", "owner")

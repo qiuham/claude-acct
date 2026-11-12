@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from contextlib import suppress
 
@@ -26,7 +27,8 @@ def is_alive(row: dict) -> bool:
     state = str(row.get("state") or "")
     if state in DEAD_STATES:
         return False
-    return bool(row.get("pid")) or state in (*takeover.RUNNING_STATES, "blocked", "waiting", "idle")
+    # 没有 pid 的 blocked / waiting / idle 是早就没进程的旧登记（如 4 天前的 Login expired），不算活着
+    return bool(row.get("pid")) or state in takeover.RUNNING_STATES
 
 
 def merge(rows: list) -> list:
@@ -44,23 +46,37 @@ def merge(rows: list) -> list:
         alive = [one for one in group if is_alive(one)]
         chosen = takeover.one_per_session(alive)[0] if alive else group[0]   # 活着的里挑最像在用的那条
         others = sorted({one["account"] for one in group if one["account"] != chosen["account"]})
-        out.append({**chosen, "alive": bool(alive), "also_on": others, "moved_from": _moved_from(chosen, group)})
+        out.append({**chosen, "alive": bool(alive), "also_on": others})
     return out
 
 
 MOVED_RECENT_SECONDS = 6 * 3600   # 换号后这么久内在总表里标「← 旧号」
-MS_EPOCH = 1e11                   # 比这大的时间戳是毫秒（claude 登记里的 startedAt）
 
 
-def _moved_from(chosen: dict, group: list) -> str:
-    """刚换过号：活着的这份是最近几小时起的，且别的号上有更早的记录 → 那个号；否则空串。"""
-    started = float(chosen.get("started_at") or 0) / (1000 if (chosen.get("started_at") or 0) > MS_EPOCH else 1)
-    if not chosen.get("pid") or time.time() - started > MOVED_RECENT_SECONDS:
-        return ""
-    # 换号会把源号上的那份停掉（stopped）；别的状态的旧记录（done、残留登记）不算换号
-    earlier = [one for one in group if one["account"] != chosen["account"] and one.get("state") == "stopped"
-               and (one.get("started_at") or 0) <= (chosen.get("started_at") or 0)]
-    return max(earlier, key=lambda one: one.get("started_at") or 0)["account"] if earlier else ""
+def recent_moves(now: float | None = None) -> dict:
+    """{完整会话编号: (从哪个号, 到哪个号)}：最近 MOVED_RECENT_SECONDS 内每条会话最后一次换号。
+
+    读 cca 自己的换号记录（record_move）：搬走后源号面板里的旧条目会被清掉，登记表里已经看不出来源。
+    """
+    from cca.paths import moves_file  # noqa: PLC0415
+
+    now = time.time() if now is None else now
+    out: dict = {}
+    with suppress(OSError):
+        for line in moves_file().read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict) and now - float(item.get("at") or 0) <= MOVED_RECENT_SECONDS:
+                out[str(item.get("session") or "")] = (str(item.get("from") or ""), str(item.get("to") or ""))
+    return out
+
+
+def _moved_from(row: dict, moves: dict) -> str:
+    """刚换过号、而且换到的就是它现在所在的号 → 从哪个号来；否则空串。"""
+    source, target = moves.get(row.get("session_id") or "", ("", ""))
+    return source if source and target == row.get("account") else ""
 
 
 def _active_at(row: dict) -> float:
@@ -94,8 +110,10 @@ def build(*, show_all: bool = False, now: float | None = None, accounts: list | 
     now = time.time() if now is None else now
     rows, failed = takeover.candidates_checked(accounts, timeout=AGENTS_TIMEOUT)
     merged = merge(rows)
+    moves = recent_moves(now)
     for row in merged:
         row["active_at"] = _active_at(row)
+        row["moved_from"] = _moved_from(row, moves)
     cutoff = now - AGENTS_RECENT_DAYS * DAY_SECONDS
     shown = [row for row in merged if show_all or row["alive"] or row["active_at"] >= cutoff]
     for row in shown:

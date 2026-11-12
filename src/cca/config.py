@@ -218,6 +218,7 @@ SUBSCRIPTION_STATUS = {
     "trialing": "试用",
     "paused": "暂停",
     "expired": "已过期",
+    "logged_out": "未登录",
 }
 
 SUBSCRIPTION_BILLING_LONG = {
@@ -254,6 +255,7 @@ STATE_STYLES = {
     "working": ("working", "yellow"),
     "blocked": ("blocked", "magenta"),
     "idle": ("idle", "dim"),
+    "shell": ("idle", "dim"),        # 接管的会话停在终端里，按空闲画
     "done": ("done", "green"),
     "failed": ("failed", "bold red"),
     "waiting": ("waiting", "yellow"),
@@ -380,7 +382,7 @@ AGENTS_USAGE = "cca agents [--all] [--json]"
 
 SESSIONS_USAGE = "cca sessions [--all] [--json] [--wide]"
 
-LIST_USAGE = "cca ls [--wide] [--json]"
+LIST_USAGE = "cca ls [<号>…] [--active] [--wide] [--json] [--cached | --refresh]"
 
 EMAIL_MIN_WIDTH = 12
 
@@ -576,11 +578,13 @@ COMMAND_USAGE = {
   目录/类型/登录/档位/额外用量/凭据与重新登录到期/额度/快照/后台会话明细；
   API 号显示端点、模型、密钥掩码、代理，以及 settings 与清单不一致时的修复命令。
 """,
-    "list": """cca ls [--wide] [--json] —— 号面板（cca list 同义）
+    "list": """cca ls [<号>…] [--active] [--wide] [--json] —— 号面板（cca list 同义）
 
   一行一个号：身份 + 额度（5 小时 / 7 天，已用 % + 重置时刻）+ 档位 + 订阅。
   额度默认实时取（5 分钟缓存）；--cached 只看本地快照，--refresh 强制刷新。
   --wide 加 后台会话数 / 登录 / 快照时刻 / 额外用量；--json 结构化输出。
+  --active 只列订阅能用的号（有效 / 试用；状态为空的正常在用订阅也算）；API 号、未登录（登录失效）、
+           订阅已取消或过期、状态未知（没取到）的藏起来，表尾说明藏了哪些。--cached 时按一天内取到的订阅判断。
 """,
     "doctor": """cca doctor [--online] [--probe-key] [--json] —— 体检
 

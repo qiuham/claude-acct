@@ -998,8 +998,35 @@ def _move_one(item: dict, target: str, prompt: str = "") -> str:
         error = deliver_after_resume(target, full, pending)
         if error:
             _redeliver_by_prompt(item, target, full, pending, error)
+        record_move(full, item["profile"], target)
         _drop_moved_source(item, target)
     return ""
+
+
+def _stale_registrations(account: str, full: str) -> list:
+    """这个号 sessions/ 里这条会话的登记文件中，进程已经不在的那些。
+
+    CC 判断「是不是还在跑」时，碰到验证不了的旧登记（例如容器重启前留下的、pid 命名空间不同）
+    会当它还在跑，于是续跑另起副本："session X is already running in the background, so this
+    started a copy"（11-11 train-h004 搬到 001 时连续 4 次被复制）。cca 这边看 pid 不在了就删掉。
+    """
+    out = []
+    for path in (profile_dir(account) / "sessions").glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("sessionId") != full:
+            continue
+        pid = int(data.get("pid") or 0)
+        if pid > 0:
+            try:
+                os.kill(pid, 0)
+                continue
+            except OSError:
+                pass
+        out.append(path)
+    return out
 
 
 COPY_RE = re.compile(r"started a copy as\s+([0-9a-fA-F][0-9a-fA-F-]{5,})")
@@ -1016,6 +1043,9 @@ def _resume_on(item: dict, target: str, launch: list) -> str:
     full = item["full"]
     if (profile_dir(target) / "jobs" / item["id"]).is_dir() and full not in live_session_ids(target):
         say(f"{item['id']}: {drop_entry(target, item['id'], full, why='目标号上的旧登记，留着续跑会另起一份副本')}")
+    for stale in _stale_registrations(target, full):
+        stale.unlink(missing_ok=True)
+        say(f"{item['id']}: 删掉了 {target} 上进程已不在的旧登记 {stale.name}（留着 CC 会当它还在跑、另起一份副本）")
     try:
         r = _run_claude(api_launch_args(target, ["--bg", "--resume", full, *launch]),
                         target, capture=True, cwd=item["cwd"], session=True)
@@ -1033,6 +1063,25 @@ def _resume_on(item: dict, target: str, launch: list) -> str:
         say(f"{item['id']}: {drop_entry(target, short, copy_id, why='续跑被 CC 复制成了副本')}")
         return f"在 {target} 上续成了副本 {short}（已停掉删掉），没有搬"
     return ""
+
+
+MOVES_KEEP_LINES = 2000   # 换号记录只留最近这么多条
+
+
+def record_move(full: str, source: str, target: str) -> None:
+    """记一条换号（watchdog 搬和手动 handoff 都走 _move_one）。源号面板里的旧条目随后会被清掉，
+    事后只靠登记表已经看不出它从哪来，所以单独记下。写失败不影响搬迁。"""
+    from cca.paths import moves_file  # noqa: PLC0415
+
+    path = moves_file()
+    line = json.dumps({"at": int(time.time()), "session": full, "from": source, "to": target}, ensure_ascii=False)
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as out:
+            out.write(line + "\n")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > MOVES_KEEP_LINES * 2:
+            path.write_text("\n".join(lines[-MOVES_KEEP_LINES:]) + "\n", encoding="utf-8")
 
 
 def _drop_moved_source(item: dict, target: str) -> None:

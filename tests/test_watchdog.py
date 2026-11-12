@@ -1065,3 +1065,14 @@ class NotifyTest(unittest.TestCase):
             record = json.loads((Path(tmp) / "notices.jsonl").read_text(encoding="utf-8"))
         self.assertEqual(record["text"], "dagset：b005 → b004")
 
+
+
+class BadTargetTest(AccountsCase):
+    """搬不进去的号记进 bad，下一轮换别的号（11-11 train-h004 四次都撞 001，然后被永久放弃）。"""
+
+    def test_failed_target_is_remembered_and_skipped(self):
+        watchdog.record_failure("006", "sid-9", 1000.0, target="001")
+        watchdog.record_failure("006", "sid-9", 2000.0, target="b003")
+        fails = watchdog.read_intents()["fails"]["sid-9"]
+        self.assertEqual(fails["bad"], ["001", "b003"])
+        self.assertEqual(fails["n"], 2)

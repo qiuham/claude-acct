@@ -2663,6 +2663,37 @@ class CliTest(unittest.TestCase):
         self.assertIn("已取消", r.stdout)
         self.assertNotIn("计费", r.stdout)
 
+    def test_ls_active_hides_api_invalid_and_unknown(self):
+        """--active 只列订阅能用的号：有效、状态为空（正常在用）留下；已取消、API 号、没取到订阅的藏起来并说明。"""
+        for name in ("002", "003", "004", "005"):
+            self.run_cli("new", name)
+            self.seed_credentials(name)
+        self.seed_api_profile("006")
+        fixture = self.subscription_live_fixture({
+            "002": {"organization_type": "claude_max", "subscription_status": "active"},
+            "003": {"organization_type": "claude_max", "subscription_status": None},
+            "004": {"organization_type": "claude_max", "subscription_status": "canceled"},
+        })
+        usage = self.usage_live_fixture(dict.fromkeys(("002", "003", "004", "005"), (1, 2)))
+        r = self.run_cli("ls", "--active", "--json", CCA_SUBSCRIPTION_LIVE_FILE=str(fixture),
+                         CCA_USAGE_LIVE_FILE=str(usage))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        data = json.loads(r.stdout)
+        shown = {p["profile"] for p in data["profiles"]}
+        self.assertTrue({"002", "003"} <= shown)
+        self.assertFalse(shown & {"004", "005", "006"})
+        self.assertIn("004", data["hidden"]["订阅无效"])
+        self.assertIn("006", data["hidden"]["API 号"])
+        self.assertIn("005", data["hidden"]["状态未知"])
+        # 没有凭据的号：未登录，不管缓存里几天前写的是什么
+        self.run_cli("new", "007")
+        r = self.run_cli("ls", "--active", "--json", CCA_SUBSCRIPTION_LIVE_FILE=str(fixture),
+                         CCA_USAGE_LIVE_FILE=str(usage))
+        self.assertIn("007", json.loads(r.stdout)["hidden"]["未登录"])
+        r = self.run_cli("ls", "--active", CCA_SUBSCRIPTION_LIVE_FILE=str(fixture), CCA_USAGE_LIVE_FILE=str(usage))
+        self.assertIn("--active 藏起来的", r.stdout)
+        self.assertNotIn("\n004 ", r.stdout)
+
     def test_subscription_with_null_status_is_not_discarded(self):
         """正常在用的订阅 `subscription_status` 是 null —— 不能因此把整条响应丢掉。"""
         self.run_cli("new", "002")

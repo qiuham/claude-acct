@@ -450,3 +450,19 @@ class ResumeOnTargetTest(unittest.TestCase):
         self.assertIn("副本 d3c532fd", problem)
         self.assertIn(("001", ["stop", "d3c532fd"]), calls)
         self.assertIn(("drop", "001", "d3c532fd"), calls)
+
+
+class StaleRegistrationTest(unittest.TestCase):
+    def test_only_dead_registrations_of_this_session_are_listed(self):
+        import os  # noqa: PLC0415
+        full = "bb183830-0000"
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "001" / "sessions"
+            folder.mkdir(parents=True)
+            (folder / "1.json").write_text(json.dumps({"sessionId": full, "pid": 999999999}), encoding="utf-8")
+            (folder / "2.json").write_text(json.dumps({"sessionId": full, "pid": os.getpid()}), encoding="utf-8")
+            (folder / "3.json").write_text(json.dumps({"sessionId": "other", "pid": 999999999}), encoding="utf-8")
+            (folder / "4.json").write_text("{bad", encoding="utf-8")
+            with mock.patch.object(lifecycle, "profile_dir", side_effect=lambda n: Path(tmp) / n):
+                stale = lifecycle._stale_registrations("001", full)  # noqa: SLF001
+            self.assertEqual([p.name for p in stale], ["1.json"])

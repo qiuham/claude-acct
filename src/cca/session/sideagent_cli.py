@@ -1,4 +1,4 @@
-"""sideagent 命令行入口（cca sideagent ...）：tell、version、bg-sync、stop-owned，以及停进程、清理残留文件。
+"""sideagent 命令行入口（cca sideagent ...）：tell、version、bg-sync、stop-owned、release，以及停进程、清理残留文件。
 
 从 sideagent.py 拆出来；引用一律写 core.X（包括本文件自己的函数），测试照旧 patch sideagent 模块就能生效。"""
 
@@ -55,6 +55,18 @@ def _latest_command(args: list) -> int:
     # 面板用：这些会话编号各自最新的那一份（/bg 等会把对话复制成新编号接着跑）。JSON：{编号: 最新编号}
     print(json.dumps({session: core.latest_session(session) for session in args if session.strip()},  # noqa: T201
                      ensure_ascii=False))
+    return 0
+
+
+def _release_command(args: list) -> int:
+    """面板的“拿掉”按钮：把一个接管的会话从这个主会话的名单里拿掉，会话本身不停。"""
+    from cca.session import takeover  # noqa: PLC0415 - 只有这个命令用
+
+    name, owner = ([item.strip() for item in args] + ["", ""])[:2]
+    if not name or not owner:
+        die("用法：cca sideagent release <名字> <主会话编号>")
+    if takeover.release(name, owner) < 0:
+        die(f"{name} 不是接管的会话")
     return 0
 
 
@@ -353,4 +365,5 @@ SUBCOMMANDS = {
     "takeover": _takeover_command,
     "latest": _latest_command,
     "stop-owned": _stop_owned_command,
+    "release": _release_command,
 }

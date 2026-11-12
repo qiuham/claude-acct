@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -82,3 +83,20 @@ class UsageReportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthStatusLoggedOutTest(unittest.TestCase):
+    """claude auth status 没登录时退出码 1 但照样输出 JSON：要记成未登录，不能当「取不到」沿用旧缓存。"""
+
+    def test_exit_1_with_logged_out_json_is_logged_out(self):
+        out = mock.Mock(returncode=1, stdout='{"loggedIn": false, "authMethod": "none"}')
+        with mock.patch.dict(os.environ, {"CCA_SUBSCRIPTION_LIVE_FILE": ""}), \
+             mock.patch.object(usage, "_run_claude", return_value=(out, "")):
+            sub, why = usage.fetch_subscription_live("002")
+        self.assertEqual((sub["status"], why), ("logged_out", ""))
+
+    def test_non_json_failure_is_still_a_failure(self):
+        out = mock.Mock(returncode=1, stdout="boom")
+        with mock.patch.dict(os.environ, {"CCA_SUBSCRIPTION_LIVE_FILE": ""}), \
+             mock.patch.object(usage, "_run_claude", return_value=(out, "")):
+            self.assertEqual(usage.fetch_subscription_live("002"), ({}, "退出码 1"))
