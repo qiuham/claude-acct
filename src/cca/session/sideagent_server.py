@@ -61,6 +61,12 @@ class _SideagentServer:
         # 插话：uuid -> {text, notify, job, started}；claude 用 command_lifecycle 报它进没进这一轮
         self.injected: dict = {}
         self.followup_turn = False
+        # 这一轮发出去的那句话的编号；claude 说它还在排队（command_lifecycle queued）时为真。
+        # 排队期间冒出来的结果不是这一轮的（例如续上旧会话时，先为旧后台任务的“已停止”通知出一个空结果）
+        self.turn_uuid = ""
+        self.turn_queued = False
+        # 这一轮 sideagent 自己（不算子代理）说的最后一段话：结果为空时拿它当结论
+        self.last_say = ""
         # 还在跑的后台任务（task_id）：照 claude 的 background_tasks_changed 整份替换，不自己配对开始/结束。
         # 环境任务（ambient）、被等着的（awaited）、Monitor 起的不算：前两个不是这一轮的活，Monitor 本来就一直开着
         self.background: set = set()
@@ -373,8 +379,9 @@ class _SideagentServer:
                             "都没有登记条目：主会话已经关了，或者重开时换成了另一段对话）")
             return
         if not text and status == "completed":
-            self._note_text("NOTIFY skip 结果是空的")
-            return
+            # 做完了也要说一声（以前跳过，主会话就一直等）。走到这里说明这一轮一句话都没说过
+            text = (f"这一轮结束了，但它没有写任何文字结论（调了 {self.turn_tool_uses} 次工具）。"
+                    "要结论可以再问它一句。")
         sender = f"uds:{self.instance_socket}"
         notice = self._notification(text, status=status, usage=usage or {}, error=error)
         body = (
@@ -425,6 +432,8 @@ class _SideagentServer:
         key = str(event.get("command_uuid") or "")
         stage = str(event.get("state") or "")
         with self.lock:
+            if key and key == self.turn_uuid:
+                self.turn_queued = stage == "queued"
             entry = self.injected.get(key)
             if entry is None:
                 return
@@ -448,6 +457,19 @@ class _SideagentServer:
                         if not entry.get("started") and key not in keep]:
                 self.injected.pop(key, None)
 
+    def _note_system(self, event: dict) -> None:
+        """system 事件：API 重试、后台任务名单、后台任务的开始/进度/结束。"""
+        subtype = event.get("subtype")
+        if subtype == "api_retry":
+            self._note_api_retry(event)
+        elif subtype == "background_tasks_changed":
+            self._set_background(event.get("tasks"))
+        else:
+            entry = core.task_event(event)
+            if entry:
+                self._note_monitor(entry)
+                self._note_event(entry)
+
     def _note_progress(self, line: str) -> None:
         """把这一轮的关键事件写成几行人能读的进度，同时记一份详细经过。"""
         event = core._parse(line.encode("utf-8"))
@@ -468,16 +490,9 @@ class _SideagentServer:
                 handle.write("ERROR " + text[:200] + "\n")
             return
         if event.get("type") == "system":
-            if event.get("subtype") == "api_retry":
-                self._note_api_retry(event)
-                return
-            if event.get("subtype") == "background_tasks_changed":
-                self._set_background(event.get("tasks"))
-                return
-            entry = core.task_event(event)
-            if entry:
-                self._note_monitor(entry)
-                self._note_event(entry)
+            self._note_system(event)
+            return
+        if self._foreign_result(event):
             return
         handlers = {"assistant": self._note_assistant,
                     "user": self._note_tool_result,
@@ -620,6 +635,8 @@ class _SideagentServer:
         if not text:
             return None
         self._clear_live()
+        if not parent:
+            self.last_say = text
         usage = message.get("usage") or {}
         used = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
         self._note_event({"kind": "say", "text": text[:4000], "tokens": used, "parent": parent})
@@ -726,6 +743,9 @@ class _SideagentServer:
         if event and event.get("type") == "result":
             # 照子代理的回报：带上这一轮的词元数、工具调用次数；被打断的标出来，调用方记成 interrupted
             extra = {"cca_tool_uses": self.turn_tool_uses, "cca_token_count": self.token_count()}
+            if not str(event.get("result") or "").strip() and self.last_say and not event.get("is_error"):
+                # 最后一步只调了工具、没写结论：用它这一轮最后说的那段话当结论
+                extra["result"] = self.last_say
             if self.turn_interrupted:
                 extra["cca_interrupted"] = True
             event = {**event, **extra}
@@ -751,6 +771,13 @@ class _SideagentServer:
             self.monitor_tasks.add(entry.get("task_id") or "")
             self.background = self.background_live - self.monitor_tasks
 
+    def _foreign_result(self, event: dict | None) -> bool:
+        """这一轮的话还在 claude 那里排队时出的结果：不是这一轮的，不记、不交。"""
+        if not event or event.get("type") != "result":
+            return False
+        with self.lock:
+            return self.busy and self.turn_queued
+
     def _should_hold(self, event: dict | None) -> bool:
         """这一轮的结果先压下：后台还有任务在跑，又不是被打断、不是出错。"""
         if not event or event.get("type") != "result":
@@ -765,6 +792,8 @@ class _SideagentServer:
             self.held = event
             count = len(self.background)
             target = self.current
+            # 压下那一轮说的（例如“已启动”）不是结论，后面那一轮的话才是
+            self.last_say = ""
         # 告诉等结果的调用方：前面这轮说的话不是最终回复（它会清掉已收的正文）
         if target is not None:
             with suppress(OSError):
@@ -789,6 +818,9 @@ class _SideagentServer:
 
     def _forward(self, target: socket.socket | None, line: str) -> None:
         event, line = self._annotate(line)
+        if self._foreign_result(event):
+            self._note_text("SKIP 这一轮的话还在排队，先出的这个结果不是它的")
+            return
         if self._should_hold(event):
             self._hold(event)
             return
@@ -935,6 +967,7 @@ class _SideagentServer:
         self.acted = False
         self.turn_interrupted = False
         self.turn_started = time.time()
+        self.last_say = ""
         # 卡住的计时从这一轮开始算：空闲了很久再接活，不能拿上一次输出的时间当起点
         self.last_output = self.turn_started
         # 新的一轮：记录重新数；短语留着（照 Claude Code：做完、闲着、再接活时都显示上一句，
@@ -1143,7 +1176,11 @@ class _SideagentServer:
         self._update_state(tokens=0, tokens_in=0, tokens_out=0, token_count=0, acted=False,
                            busy=True,
                            turn_started=self.turn_started, queued=len(self.queue))
-        message = {"type": "user",
+        key = str(uuid.uuid4())
+        with self.lock:
+            self.turn_uuid = key
+            self.turn_queued = False
+        message = {"type": "user", "uuid": key,
                    "message": {"role": "user",
                                "content": [{"type": "text", "text": text}]}}
         with suppress(OSError):

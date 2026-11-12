@@ -455,7 +455,9 @@ class BackgroundHoldServerTest(_ServerCase):
 
     def feed(self, event: dict) -> None:
         line = json.dumps(event) + "\n"
+        # 照读 claude 输出的顺序：记进度、看 command_lifecycle、再转给调用方
         self.server._note_progress(line)  # noqa: SLF001
+        self.server._note_control(line)  # noqa: SLF001
         with self.server.lock:
             target = self.server.current
         self.server._forward(target, line)  # noqa: SLF001
@@ -605,6 +607,48 @@ class BackgroundHoldServerTest(_ServerCase):
         self.assertTrue(self.server.busy)
         self.assertIsNotNone(self.server.held)
 
+    def test_result_while_our_message_is_queued_is_not_ours(self):
+        """续上旧会话：claude 先为旧后台任务的“已停止”通知出一个空结果，然后才处理这一轮的话。"""
+        ours = self.start_turn()
+        self.server.turn_uuid = "u1"
+        self.feed({"type": "system", "subtype": "task_notification", "task_id": "old", "status": "stopped"})
+        self.feed({"type": "command_lifecycle", "state": "queued", "command_uuid": "u1"})
+        self.feed({"type": "result", "result": "", "num_turns": 0, "duration_ms": 21})
+        self.assertTrue(self.server.busy)
+        self.assertIsNone(self.result_of(ours, wait=0.2))
+        self.feed({"type": "command_lifecycle", "state": "started", "command_uuid": "u1"})
+        self.feed({"type": "result", "result": "OK", "num_turns": 1})
+        self.assertEqual(self.result_of(ours)["result"], "OK")
+        self.assertFalse(self.server.busy)
+        events = sideagent._events_path("ds#t1").read_text(encoding="utf-8")  # noqa: SLF001
+        self.assertEqual(events.count('"kind": "result"'), 1)
+
+    def test_dispatch_tags_the_message(self):
+        self.server.queue.append((None, "干活", False, "", True))
+        self.server._dispatch()  # noqa: SLF001
+        sent = self.server.process.stdin.lines[-1]
+        self.assertEqual(sent["uuid"], self.server.turn_uuid)
+        self.assertFalse(self.server.turn_queued)
+
+    def test_empty_result_uses_the_last_thing_it_said(self):
+        """最后一步只调了工具、结果为空：拿它这一轮最后说的那段话当结论。"""
+        ours = self.start_turn()
+        self.server._start_turn_books()  # noqa: SLF001
+        self.feed({"type": "assistant", "message": {"content": [{"type": "text", "text": "结论：A 比 B 快 12%"}]}})
+        self.feed({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t9", "name": "Write", "input": {"file_path": "/x.md"}}]}})
+        self.feed({"type": "result", "result": ""})
+        self.assertEqual(self.result_of(ours)["result"], "结论：A 比 B 快 12%")
+
+    def test_held_turns_words_are_not_the_conclusion(self):
+        ours = self.start_turn()
+        self.bg_started()
+        self.feed({"type": "assistant", "message": {"content": [{"type": "text", "text": "已启动"}]}})
+        self.feed({"type": "result", "result": "已启动"})
+        self.bg_done()
+        self.feed({"type": "result", "result": ""})
+        self.assertEqual(self.result_of(ours)["result"], "")
+
     def test_lingering_exit_waits_for_background(self):
         self.server.exit_at = time.time() - 1
         self.server.background = {"w1"}
@@ -664,7 +708,9 @@ class InjectServerTest(_ServerCase):
         self.server._handle(theirs)  # noqa: SLF001
         self.assertEqual(self.reply_of(ours), {"type": "cca_ack", "mode": "queue"})
         self.assertTrue(self.server.busy)
-        self.assertNotIn("uuid", self.server.process.stdin.lines[-1])
+        # 普通的一轮也带编号（认得出排队时冒出的别人的结果），但不算插话
+        self.assertEqual(self.server.process.stdin.lines[-1]["uuid"], self.server.turn_uuid)
+        self.assertEqual(self.server.injected, {})
 
     def test_lifecycle_started_marks_merged(self):
         self.server.busy = True
@@ -964,6 +1010,15 @@ class CallerByPidTest(_ServerCase):
         self.assertIn("做完了", self.received(server)["message"]["content"])
         self.assertEqual(self.server.owner["pid"], 5000)
         self.assertEqual(sideagent._read_state("ds#t1")["owner_pid"], 5000)  # noqa: SLF001
+
+    def test_empty_result_still_notifies(self):
+        """做完了但没有输出：也要通知一次，不能悄悄跳过让主会话一直等。"""
+        self.server.owner = {"pid": 5000, "proc_start": "s2", "session": "会话-1"}
+        self.server.instance_socket = "/me.sock"
+        sock, server = self.listen("c.sock")
+        self.entry(5000, "会话-1", sock, start="s2")
+        self.server._notify_main("")  # noqa: SLF001
+        self.assertIn("没有写任何文字结论", self.received(server)["message"]["content"])
 
     def test_pid_reused_by_another_program_is_not_the_owner(self):
         self.server.owner = {"pid": 4242, "proc_start": "s1", "session": "会话-1"}
