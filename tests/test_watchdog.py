@@ -151,6 +151,11 @@ class DecideTest(unittest.TestCase):
     def action(self, **kw) -> str:
         return watchdog.decide(obs(**kw)).action
 
+    def test_empty_session_without_a_transcript_is_left_alone(self):
+        """刚开、还没说话的会话：没有对话可搬（11-12 b002 上的空会话被硬搬失败，还被塞了一句「接着做」）。"""
+        self.assertEqual(self.action(has_transcript=False), watchdog.SKIP)
+        self.assertEqual(self.action(has_transcript=False, turn="walled", windows=win(five=100)), watchdog.MOVE_NOW)
+
     def test_busy_session_at_threshold_waits_for_the_turn_end(self):
         decision = watchdog.decide(obs())
         self.assertEqual(decision.action, watchdog.ARMED)
@@ -826,7 +831,7 @@ class ExecuteTest(AccountsCase):
         intents = {"version": 1, "stays": {}, "moves": {self.SID: {"account": "b005", "target": "b004", "at": 1}}}
         result, moved, notices, _, forgotten = self.go(intents=intents)
         self.assertTrue(result)
-        self.assertEqual(moved, [(("b005", "b004", self.SID), {"prechecked": True})])
+        self.assertEqual(moved, [(("b005", "b004", self.SID), {"prechecked": True, "tell": False})])
         self.assertEqual(notices, [("b005", "b004", "dagset")])
         self.assertEqual(forgotten, [self.SID])
         self.assertEqual(watchdog.read_intents()["moves"], {})

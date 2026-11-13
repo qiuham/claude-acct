@@ -503,3 +503,25 @@ class HintKeyTest(unittest.TestCase):
                 "seven_day": {"percent": 20, "resets_at": now + 86400, "reset_passed": False}}}}]
             keys.add(quota_hint.advise("b004", "sid", rows=rows, shares=lambda _n: True, kind="bg")["key"])
         self.assertEqual(len(keys), 1)
+
+
+class QuietFailureTest(unittest.TestCase):
+    """watchdog 自己发起的搬迁失败、会话还在源号：不发「接着做」（会凭空开出一轮）；会话自己要求的才告诉它。"""
+
+    def run_move(self, *, tell):
+        told = []
+        with mock.patch.object(lifecycle, "live_session_ids", return_value={"sid-full"}), \
+             mock.patch.object(lifecycle, "handoff_candidates", return_value=[]), \
+             mock.patch.object(lifecycle, "discover_profiles", return_value=["b002"]), \
+             mock.patch.object(lifecycle, "_tell_session", side_effect=lambda *a: told.append(a)), \
+             mock.patch.object(lifecycle, "say"):
+            code = lifecycle.move_session("b002", "001", "sid-full", prechecked=True, tell=tell)
+        return code, told
+
+    def test_watchdog_initiated_failure_is_silent(self):
+        self.assertEqual(self.run_move(tell=False), (1, []))
+
+    def test_requested_move_failure_tells_the_session(self):
+        code, told = self.run_move(tell=True)
+        self.assertEqual(code, 1)
+        self.assertIn("没换到 001", told[0][2])

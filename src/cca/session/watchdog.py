@@ -567,6 +567,7 @@ class Obs:
     move: dict | None = None
     stay: dict | None = None
     cwd: str = ""
+    has_transcript: bool = True   # 还没有对话记录的空会话（刚开、还没说话）：没东西可搬
 
 
 @dataclass
@@ -631,6 +632,9 @@ def decide(obs: Obs) -> Decision:  # noqa: PLR0911
     if obs.move:
         # `cca handoff <目标> --current` 是明确的要求：不看阈值，也不受快重置 / stay / 闲置影响
         return make(ARMED, f"{_hot_text(hot)}；会话自己要求换号" if hot else "会话自己要求换号", explicit=True)
+    if not obs.has_transcript:
+        # 刚开、还没说过话的会话：没有对话可搬，也不耗额度；硬搬只会失败，还往里塞一句「接着做」凭空开出一轮
+        return make(SKIP, "还没有对话")
     if not hot:
         return make(SKIP, "没到提醒点")
     why = _hot_text(hot)
@@ -732,7 +736,8 @@ def snapshot(now: float | None = None, *, fresh: bool = False) -> tuple:
             obs = Obs(session=full, account=account, name=str(entry.get("name") or ""),
                       turn=turn_state(account, full), idle=entry.get("status") == "idle",
                       last_active=last_activity(account, entry), windows=windows, limits=limits, now=now,
-                      move=move, stay=intents["stays"].get(full), cwd=str(entry.get("cwd") or ""))
+                      move=move, stay=intents["stays"].get(full), cwd=str(entry.get("cwd") or ""),
+                      has_transcript=session_transcript(profile_dir(account), full[:8]) is not None)
             decision = decide(obs)
             if decision.action in (MOVE_NOW, ARMED):
                 decision = _with_target(decision, rows, move, limits, now)
@@ -809,7 +814,7 @@ def execute(decision: Decision, *, now: float | None = None, outcome: dict | Non
         if problem:
             log(f"{short}：{target} 不行（{problem}），换下一个")
             continue
-        code = lifecycle.move_session(source, target, full, prechecked=True)
+        code = lifecycle.move_session(source, target, full, prechecked=True, tell=decision.explicit)
         if code != 0:
             if code == lifecycle.MOVE_ALREADY_THERE:
                 # 目标号上已经有一份：重复会话，不是搬失败；不计失败次数，下一轮的重复处理会停掉多余的那份

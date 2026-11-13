@@ -1385,7 +1385,7 @@ def _request_stay() -> int:
     return 0
 
 
-def move_session(source: str, target: str, full: str, *, prechecked: bool = False) -> int:
+def move_session(source: str, target: str, full: str, *, prechecked: bool = False, tell: bool = True) -> int:
     """把一条会话从源号搬到目标号并让它接着做（由常驻的 watchdog 在合适的时刻调用）。
 
     原则：任何一步不成，都不让会话就这么停着。
@@ -1418,10 +1418,13 @@ def move_session(source: str, target: str, full: str, *, prechecked: bool = Fals
                 return 1
             problem = (failures or ["原因不明"])[0]
     say(f"{full[:8]}: 没换到 {target}：{problem}")
-    back = f"（cca）没换到 {target}：{problem}。会话还在 {source} 上，接着做刚才没做完的事。"
+    # tell：会话自己要求换号（--current）时它在等结果，要告诉它没换成；watchdog 自己发起的，
+    # 会话本来停在这一轮结束、什么都不知道，发一句「接着做」反而凭空开出一轮——不发。
+    back = f"（cca）没换到 {target}：{problem}。会话还在 {source} 上，接着做刚才没做完的事。" if tell else ""
     running_on = [name for name in discover_profiles() if full in live_session_ids(name)]
     if source in running_on:
-        _tell_session(source, full, back)
+        if tell:
+            _tell_session(source, full, back)
     elif running_on:
         # 它已经在别的号上跑着（目标号其实起来了、或者另有人在搬）：再在源号续一份就是副本
         say(f"{full[:8]}: 它已经在 {'、'.join(running_on)} 上跑着，不再回 {source} 续")
