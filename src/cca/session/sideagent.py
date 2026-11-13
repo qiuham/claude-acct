@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -686,14 +687,25 @@ def _events_path(name: str) -> Path:
     return agent_dir(name) / "events.jsonl"
 
 
+# 终端控制序列（改颜色、挪光标、OSC）和空字符等控制字符：工具读二进制文件时会带进输出，
+# 原样记下来、画到面板上会把整页搞乱。换行和制表符留着。
+_ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|[\x80-\x9f]")
+_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def plain_text(text: str) -> str:
+    """去掉终端控制码和控制字符，只留能直接显示的文字。"""
+    return _CONTROLS.sub("", _ESCAPES.sub("", text))
+
+
 def _tool_output(block: dict) -> str:
-    """工具结果的内容：可能是字符串，也可能是一串块。"""
+    """工具结果的内容：可能是字符串，也可能是一串块。控制码去掉。"""
     content = block.get("content")
     if isinstance(content, str):
-        return content
+        return plain_text(content)
     parts = [str(item.get("text") or "")
              for item in content or [] if isinstance(item, dict)]
-    return "".join(parts)
+    return plain_text("".join(parts))
 
 
 def _read_state(name: str) -> dict:

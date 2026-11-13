@@ -1,6 +1,8 @@
 // 工作流详情页要用的纯函数：读出来的进度清单 → 按阶段分组的一行行；子代理对话记录 → 面板能画的事件。
 // 不碰界面、不读文件，方便单独测。
 
+import { plainEvent } from './text-width.js'
+
 // 子代理状态 → 行首的记号（照主界面：在跑实心、做完打勾、出错打叉、还没开始空心）
 const MARKS = { done: '✓', error: '✗', start: '●', progress: '●' }
 
@@ -79,6 +81,10 @@ function resultText(content) {
 
 // 子代理对话记录（agent-<编号>.jsonl）→ 面板事件：说的话、思考、工具调用、工具输出，都挂在这个子代理下
 export function transcriptEvents(text, agentId) {
+  return rawTranscriptEvents(text, agentId).map(plainEvent)
+}
+
+function rawTranscriptEvents(text, agentId) {
   const out = []
   for (const line of String(text || '').split('\n')) {
     let row

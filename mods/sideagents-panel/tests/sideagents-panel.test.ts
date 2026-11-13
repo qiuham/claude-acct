@@ -6,6 +6,7 @@ import { ccaCompletions } from '../hooks/cca-command.js'
 import { otherTasksText } from '../hooks/register.js'
 import { QUOTA_POLL_MS, parseHint, parseQuota, withHint } from '../hooks/quota-hint.js'
 import { transcriptEvents, workflowGroups, durationText } from '../hooks/workflow-view.js'
+import { plainText } from '../hooks/text-width.js'
 import { activityOf, inboxSignalOf, waitingWhat, headerMeta, whoOf, statusText, arrowTarget, recallStep, bandLayout, compactCount, displayWidth, elapsedText, foldTasks, footerRows, taskKind, workflowCounts, progressBar } from '../hooks/register.js'
 
 const HOME = '/home/test'
@@ -2457,4 +2458,9 @@ test('工作流那一行能点进去：按阶段列子代理；再点一个子�
   // 说的话照主界面用 Markdown 画
   const said = await agent.find({ type: 'Markdown' })
   expect(String(said?.props?.text || '')).toContain('读完了 a 文件')
+})
+
+test('工具输出里的终端控制码和空字符画之前去掉（读二进制文件时会带进来，原样画整页变黑）', () => {
+  expect(plainText('a\u001b[23mb\u0000c\u001b]0;标题\u0007d\te\nf')).toBe('abcd\te\nf')
+  expect(plainText(undefined)).toBe('')
 })

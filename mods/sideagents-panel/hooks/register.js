@@ -1,4 +1,4 @@
-import { displayWidth } from './text-width.js'
+import { displayWidth, plainEvent } from './text-width.js'
 export { displayWidth }
 import { onTakeoverCall } from './takeover-picker.js'
 import { withPeerHint } from './peer-hint.js'
@@ -571,8 +571,9 @@ async function readJson($, path) {
 
 async function readEvents($, path) {
   try {
+    // 文字里的终端控制码去掉再画（工具读回二进制时会带进来，原样画会把整页搞乱）
     return (await $.fs.read(path)).split('\n').filter(Boolean)
-      .map((line) => { try { return JSON.parse(line) } catch { return null } })
+      .map((line) => { try { return plainEvent(JSON.parse(line)) } catch { return null } })
       .filter(Boolean)
   } catch {
     return []

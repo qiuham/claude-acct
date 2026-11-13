@@ -217,6 +217,12 @@ class TaskEventTest(unittest.TestCase):
         self.assertEqual(path.parent.name, "workflows")
 
 
+class PlainTextTest(unittest.TestCase):
+    def test_tool_output_drops_control_codes(self):
+        block = {"content": [{"type": "text", "text": "ok\x1b[23m\x00bin\x1b]0;t\x07\tend\n"}]}
+        self.assertEqual(sideagent._tool_output(block), "okbin\tend\n")  # noqa: SLF001
+
+
 class ToolSummaryTest(unittest.TestCase):
     """进度行只写最短的一句说明。"""
 

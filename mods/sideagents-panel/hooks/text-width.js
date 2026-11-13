@@ -82,3 +82,25 @@ function isWide(code) {
   }
   return false
 }
+
+// 要画到终端里的文字去掉控制码：终端控制序列（改颜色、挪光标、OSC）、空字符等控制字符。
+// 工具输出可能是读二进制文件读回来的（例如 grep 了 claude 程序本身），原样画会把整页搞乱、变成一片黑。
+// 换行和制表符留着。
+// biome-ignore lint/suspicious/noControlCharactersInRegex: 这里就是要匹配并去掉终端控制序列
+const ESCAPES = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-_]|[\u0080-\u009f]/g
+// biome-ignore lint/suspicious/noControlCharactersInRegex: 这里就是要匹配并去掉控制字符
+const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f]/g
+
+export function plainText(text) {
+  return String(text ?? '').replace(ESCAPES, '').replace(CONTROLS, '')
+}
+
+// 事件里会画出来的几个文字字段都清一遍
+export function plainEvent(event) {
+  if (!event || typeof event !== 'object') return event
+  const out = { ...event }
+  for (const key of ['text', 'summary', 'description']) {
+    if (typeof out[key] === 'string') out[key] = plainText(out[key])
+  }
+  return out
+}
