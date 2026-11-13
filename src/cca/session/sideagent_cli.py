@@ -384,8 +384,36 @@ def _inbox_command(args: list) -> int:
     return 2
 
 
+def _workflow_transcript_command(args: list) -> int:
+    """cca sideagent workflow-transcript <名字> <子代理编号>：打印工作流里这个子代理的对话记录路径。
+
+    记录在 sideagent 会话目录下：projects/*/<会话编号>/subagents/workflows/<运行编号>/agent-<编号>.jsonl。
+    面板点进工作流的子代理时用它找文件，找到后自己读。找不到退出码 1。
+    """
+    if len(args) < 2:  # noqa: PLR2004 - 名字和子代理编号
+        die("用法：cca sideagent workflow-transcript <名字> <子代理编号>")
+    name, agent = args[0], args[1]
+    if not agent.isalnum():
+        return 1
+    session = str(core._read_state(name).get("session_id") or "") \
+        or str(core._read_record(core.job_path(name)).get("session_id") or "")
+    if not session:
+        return 1
+    from cca.paths import profile_dir  # noqa: PLC0415
+
+    pattern = f"projects/*/{session}/subagents/workflows/*/agent-{agent}.jsonl"
+    bases = [profile_dir(core._account_of(name)), *sorted((Path.home() / ".claude-accounts").glob("*")),
+             Path.home() / ".claude"]
+    for base in bases:
+        for hit in base.glob(pattern):
+            sys.stdout.write(str(hit) + "\n")
+            return 0
+    return 1
+
+
 SUBCOMMANDS = {
     "inbox": _inbox_command,
+    "workflow-transcript": _workflow_transcript_command,
     "permission-hook": _permission_hook_command,
     "permission-answer": _permission_answer_command,
     "hook": _hook_command,

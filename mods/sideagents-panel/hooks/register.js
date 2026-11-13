@@ -7,6 +7,7 @@ import { COMMAND as CCA_COMMAND, ccaCompletions, runCca } from './cca-command.js
 import { forgetList, hasList, onListArrow, onListFocus, onListMessage, renderList } from './list-pane.js'
 import { bandMark, circleOf } from './marks.js'
 import { bashTool, editTool, readTool, writeTool, taskTool, genericTool, toolOutput } from './renderers.js'
+import { transcriptEvents, workflowGroups } from './workflow-view.js'
 
 // 在输入框上方画 cca sideagent：一个sideagent一行，像子代理一样。
 // Ctrl+X Tab 把焦点移进来，↑↓ 选，Enter 打开，鼠标也能点。
@@ -34,6 +35,10 @@ const BAND_WINDOW = 5          // 横条最多画几行，和子代理列表一�
 const paneNames = {}
 // 点开子代理的页面：面板编号 -> 哪个sideagent的哪个子代理
 const agentPanes = {}
+// 工作流详情页：页面编号 -> {name, taskId, desc}
+const workflowPanes = {}
+// 工作流子代理的对话记录路径（cca sideagent workflow-transcript 查一次就记住）
+const transcriptPaths = {}
 // 刚从输入框发出去的话：sideagent还没接住时先挂在正文里，和主界面一样看得见
 const sentByPane = {}
 // 每个面板已经看到几轮开始：新的一轮开始，就从“待接住”里挪走最老的一条
@@ -937,7 +942,9 @@ function taskRow(task, kind, { toolOf, allEvents }) {
     return { kind: 'Monitor', desc: String(task.description || tool.input?.description || ''), doing: '监视中' }
   }
   return { kind: 'Workflow', desc: String(task.workflow_name || task.description || ''),
-    doing: [workflowDoing(task) || task.last_tool_name || '运行中', taskMeta(task)].filter(Boolean).join(' · ') }
+    doing: [workflowDoing(task) || task.last_tool_name || '运行中', taskMeta(task)].filter(Boolean).join(' · '),
+    // 点进去看各阶段、每个子代理（完整进度存在 sideagents/<名字>/workflows/<任务编号>.json）
+    workflow: { taskId: task.id } }
 }
 
 // 底部要画的行：有 bgtask 事件就照原生分类；旧记录没有，就按工具名猜（Agent/Task、分叉执行的 Skill）
@@ -1100,7 +1107,7 @@ function paneFooter(el, ctx) {
   // 记下这页能用 ↑↓ 走到的行：输入框在前，能点进去的子代理行跟着（ui.scroll 里用）
   footerKeys[ctx.paneId] = [
     ...(input ? ['reply-' + ctx.paneId] : []),
-    ...shown.flatMap((row, index) => (row.agent ? [agentRowKey(ctx.paneId, index)] : [])),
+    ...shown.flatMap((row, index) => (row.agent || row.workflow ? [agentRowKey(ctx.paneId, index)] : [])),
   ]
   return [...pending, ...(input ? [input] : []), ...agents, ...summary]
 }
@@ -1147,8 +1154,9 @@ function taskBand(el, ctx, runningRows) {
   const width = Math.max(10, ctx.paneWidth)
   const focus = String(focusOf[ctx.paneId] || '')
   const rows = runningRows.map((row, index) => {
-    const key = row.agent ? agentRowKey(ctx.paneId, index) : 'task-' + ctx.paneId + '-' + index
+    const key = row.agent || row.workflow ? agentRowKey(ctx.paneId, index) : 'task-' + ctx.paneId + '-' + index
     if (row.agent) paneRowOpen[key] = () => ctx.onOpenAgent(key, row.kind + ' · ' + row.desc, row.agent)
+    if (row.workflow) paneRowOpen[key] = () => ctx.onOpenWorkflow?.(row.workflow.taskId, row.desc)
     return {
       name: key,
       // 照原生后台任务行：Agent(查文档) 后面跟它现在在干什么
@@ -1162,7 +1170,7 @@ function taskBand(el, ctx, runningRows) {
       circleColor: '',
       selected: focus === key,
       viewed: false,
-      agent: Boolean(row.agent),
+      agent: Boolean(row.agent || row.workflow),
     }
   })
   const { labelWidth, statusWidth } = bandLayout(rows)
@@ -1541,7 +1549,7 @@ async function closeGonePanes($, fresh) {
   try {
     for (const pane of (await $.ui.panes()) || []) {
       const id = String(pane?.id || '')
-      const name = paneNames[id] || agentPanes[id]?.name
+      const name = paneNames[id] || agentPanes[id]?.name || workflowPanes[id]?.name
       if (name && !fresh.byName[name]) await $.ui.close({ id })
     }
   } catch {
@@ -1705,7 +1713,7 @@ async function openPeerPane($, peerName) {
   try {
     for (const pane of (await $.ui.panes()) || []) {
       const other = String(pane?.id || '')
-      if ((other.startsWith('peer-') || other.startsWith('agent-')) && other !== id) {
+      if ((other.startsWith('peer-') || other.startsWith('agent-') || other.startsWith('wf-')) && other !== id) {
         await $.ui.close({ id: other })
       }
     }
@@ -1924,12 +1932,12 @@ function pendingSay(paneId, allEvents, entry, isAgent) {
 }
 
 // 点一行子代理就进它自己的页面
-async function openAgentPane($, { id, desc, agent, name }) {
-  agentPanes[id] = { name, agentId: agent.id }
+async function openAgentPane($, { id, desc, agent, name, workflow = null }) {
+  agentPanes[id] = { name, agentId: agent.id, workflow }
   try {
     for (const pane of (await $.ui.panes()) || []) {
       const other = String(pane?.id || '')
-      if ((other.startsWith('peer-') || other.startsWith('agent-')) && other !== id) {
+      if ((other.startsWith('peer-') || other.startsWith('agent-') || other.startsWith('wf-')) && other !== id) {
         await $.ui.close({ id: other })
       }
     }
@@ -1938,6 +1946,110 @@ async function openAgentPane($, { id, desc, agent, name }) {
   }
   const opened = await $.ui.open({ id, title: clip(desc, 40), backgroundColor: 'transparent', focus: true })
   await trace($, 'agent pane open ' + id + ' ' + JSON.stringify(opened))
+}
+
+// 这一页的对象还在不在干活：工作流子代理看进度清单；普通子代理看有没有交回结果；sideagent 看自己的状态
+function paneRunning(picked, { isAgent, target, entry }) {
+  if (picked.running !== undefined) return picked.running
+  if (!isAgent) return entry.running
+  return !picked.allEvents.some((ev) => ev.kind === 'tool_result' && ev.id === target.agentId)
+}
+
+// ---- 工作流详情页：按阶段列出每个子代理；点一个子代理看它每一步（读它的对话记录）
+
+async function closeOtherPanes($, keep) {
+  try {
+    for (const pane of (await $.ui.panes()) || []) {
+      const other = String(pane?.id || '')
+      if ((other.startsWith('peer-') || other.startsWith('agent-') || other.startsWith('wf-')) && other !== keep) {
+        await $.ui.close({ id: other })
+      }
+    }
+  } catch {
+    // 关不掉就算了
+  }
+}
+
+async function openWorkflowPane($, { name, taskId, desc = '' }) {
+  const id = ('wf-' + name + '-' + taskId).replace(/[^A-Za-z0-9_-]/g, '-')
+  workflowPanes[id] = { name, taskId, desc: desc || workflowPanes[id]?.desc || '' }
+  await closeOtherPanes($, id)
+  await $.ui.open({ id, title: clip('Workflow · ' + (workflowPanes[id].desc || taskId), 40),
+    backgroundColor: 'transparent', focus: true })
+}
+
+async function readWorkflowItems($, name, taskId) {
+  try {
+    const home = await $.env.get('HOME')
+    const data = JSON.parse(String(await $.fs.read(home + '/.cca/sideagents/' + name + '/workflows/' + taskId + '.json')))
+    return Array.isArray(data?.items) ? data.items : []
+  } catch {
+    return []
+  }
+}
+
+async function renderWorkflowPane($, e, next) {
+  const paneId = String(e.requestId || '')
+  if (!paneId.startsWith('wf-')) return next(e)
+  const wf = workflowPanes[paneId] || {}
+  const el = $.ui.resolve(e)
+  const { Box, Text, Button } = el
+  const entry = byName[wf.name]
+  if (!entry) return Box({ flexDirection: 'column', children: [Text({ children: ['这个sideagent已经结束'], dimColor: true })] })
+  const groups = workflowGroups(await readWorkflowItems($, wf.name, wf.taskId))
+  const children = paneHeader(el, { status: look(entry), name: wf.name, label: 'Workflow · ' + (wf.desc || wf.taskId),
+    isAgent: true, paneId, bodyColumns: e.props.bodyColumns, onBack: () => openPeerPane($, wf.name) })
+  if (!groups.length) {
+    children.push(Text({ children: ['还没有子代理的进度（改代码前起的 sideagent 没存完整清单）'], dimColor: true }))
+  }
+  const keys = []
+  for (const group of groups) {
+    children.push(Text({ children: [(group.title || '未分阶段') + '  ' + group.counts], bold: true }))
+    for (const row of group.agents) {
+      const key = ('wfa-' + paneId + '-' + row.agentId).replace(/[^A-Za-z0-9_-]/g, '-')
+      keys.push(key)
+      paneRowOpen[key] = () => openWorkflowAgent($, wf, row)
+      children.push(Button({ key, plain: true, label: row.label, onPress: () => paneRowOpen[key]?.(),
+        children: [Text({ wrap: 'truncate-end', dimColor: focusOf[paneId] !== key,
+          children: ['  ' + row.mark + ' ' + row.label + (row.meta ? '  ' + row.meta : '')] })] }))
+      if (row.detail) children.push(Text({ children: ['      ' + row.detail], dimColor: true, wrap: 'truncate-end' }))
+    }
+  }
+  footerKeys[paneId] = keys
+  return Box({ flexDirection: 'column', paddingLeft: 2, paddingRight: 2, children })
+}
+
+async function openWorkflowAgent($, wf, row) {
+  if (!row.agentId) return
+  const id = ('agent-wf-' + row.agentId).replace(/[^A-Za-z0-9_-]/g, '-')
+  await openAgentPane($, { id, desc: 'Agent · ' + row.label, agent: { id: row.agentId }, name: wf.name,
+    workflow: { taskId: wf.taskId, desc: wf.desc, label: row.label } })
+}
+
+// 工作流里一个子代理的页面：事件从它的对话记录来（cca 查一次路径，之后每次刷新只读文件）
+async function workflowAgentEvents($, name, target) {
+  const agentId = String(target.agentId || '')
+  if (!transcriptPaths[agentId]) {
+    try {
+      const out = await $.process.run(['cca', 'sideagent', 'workflow-transcript', name, agentId], { timeoutMs: 15000 })
+      if (out && Number(out.exitCode) === 0) transcriptPaths[agentId] = String(out.stdout || '').trim()
+    } catch {
+      // 还没有记录（刚开始）：下次刷新再找
+    }
+  }
+  let text = ''
+  if (transcriptPaths[agentId]) {
+    try {
+      text = String(await $.fs.read(transcriptPaths[agentId]))
+    } catch {
+      text = ''
+    }
+  }
+  const items = await readWorkflowItems($, name, target.workflow.taskId)
+  const item = items.find((one) => one?.agentId === agentId) || {}
+  const allEvents = [{ kind: 'task', text: target.workflow.label || agentId }, ...transcriptEvents(text, agentId)]
+  return { allEvents, agents: [], agentDone: () => true, taskRunning: () => undefined,
+    running: item.state === 'start' || item.state === 'progress' }
 }
 
 // 点开某个sideagent（或它的子代理）那一页的全部内容
@@ -1962,19 +2074,18 @@ async function renderPeerPane($, e, next) {
       isAgent,
       paneId,
       bodyColumns: e.props.bodyColumns,
-      onBack: () => openPeerPane($, name),
+      onBack: () => (target.workflow ? openWorkflowPane($, { name, ...target.workflow }) : openPeerPane($, name)),
       summary: isAgent ? '' : headerSummary(entry, status), meta: isAgent ? '' : headerMeta(name, entry),
       extra: isAgent ? null : paneExtra($, $.ui.resolve(e), { name, entry, paneId }),
     })
     const { iconBox, paneWidth, bodyWidth, body, line } = paneStyles($.ui.resolve(e), e.props.bodyColumns)
 
     // 子代理发出来的事件都带 parent；点进来是子代理页时只留它自己的
-    const { allEvents, agents, agentDone, taskRunning } = eventsOf(entry, { isAgent, target })
+    const picked = target.workflow ? await workflowAgentEvents($, name, target) : eventsOf(entry, { isAgent, target })
+    const { allEvents, agents, agentDone, taskRunning } = picked
     const agentIds = new Set(agents.map((agent) => agent.id).filter(Boolean))
     const live = isAgent ? '' : entry.live
-    const running = isAgent
-      ? !allEvents.some((ev) => ev.kind === 'tool_result' && ev.id === target.agentId)
-      : entry.running
+    const running = paneRunning(picked, { isAgent, target, entry })
     const events = visibleEvents(allEvents, { isAgent, view, agentIds })
     eventNodes($.ui.resolve(e), {
       events,
@@ -2019,6 +2130,7 @@ async function renderPeerPane($, e, next) {
       clearValue: Boolean(clearInput[paneId]), recall: recallValue[paneId],
       onSend: (said) => sendFromPane($, paneId, name, said),
       onOpenAgent: (id, desc, agent) => openAgentPane($, { id, desc, agent, name }),
+      onOpenWorkflow: (taskId, desc) => openWorkflowPane($, { name, taskId, desc }),
     })
     if (clearInput[paneId]) delete clearInput[paneId]
     delete recallValue[paneId]
@@ -2227,7 +2339,7 @@ async function onFocus($, e, next) {
       bandFocus = element
       $.ui.invalidate('ui.render')
     }
-  } else if (id.startsWith('peer-') || id.startsWith('agent-')) {
+  } else if (id.startsWith('peer-') || id.startsWith('agent-') || id.startsWith('wf-')) {
     const reply = 'reply-' + id
     const rows = (footerKeys[id] || []).filter((key) => key !== reply)
     const current = String(focusOf[id] || '')
@@ -2431,7 +2543,7 @@ export function register(on) {
       await onListArrow($, id, Number(e.by))
       return {}
     }
-    if (!id.startsWith('peer-') && !id.startsWith('agent-')) return next(e)
+    if (!id.startsWith('peer-') && !id.startsWith('agent-') && !id.startsWith('wf-')) return next(e)
     // 方向键（没有指针位置，一次一行）：照主界面，↑↓ 不滚正文，交给 onArrow
     if (e.origin?.kind === 'person' && !e.pointer && Math.abs(Number(e.by || 0)) === 1) {
       await onArrow($, id, Number(e.by))
@@ -2459,8 +2571,11 @@ export function register(on) {
       if (id.startsWith('peer-')) viewedPeer = ''
       clearBandFocus($)
     }
-    if (id.startsWith('agent-') && agentPanes[id] && byName[agentPanes[id].name]) {
-      await openPeerPane($, agentPanes[id].name)
+    // 子代理页关了回上一页：工作流里的子代理回工作流页，其余回 sideagent 页；工作流页关了回 sideagent 页
+    const back = agentPanes[id] || workflowPanes[id]
+    if ((id.startsWith('agent-') || id.startsWith('wf-')) && back && byName[back.name]) {
+      if (back.workflow) await openWorkflowPane($, { name: back.name, ...back.workflow })
+      else await openPeerPane($, back.name)
     }
     return done
   })
@@ -2476,7 +2591,8 @@ export function register(on) {
   })
   on('ui.render', { component: 'Pane' }, renderList)
 
-  // 点某一行开的面板：那个sideagent的完整进度
+  // 点某一行开的面板：那个sideagent的完整进度；工作流那一行开的是工作流详情页
+  on('ui.render', { component: 'Pane' }, renderWorkflowPane)
   on('ui.render', { component: 'Pane' }, renderPeerPane)
 
   // 横条那一行（Client）被鼠标点了：打开它的详情

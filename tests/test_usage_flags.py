@@ -100,3 +100,35 @@ class AuthStatusLoggedOutTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CCA_SUBSCRIPTION_LIVE_FILE": ""}), \
              mock.patch.object(usage, "_run_claude", return_value=(out, "")):
             self.assertEqual(usage.fetch_subscription_live("002"), ({}, "退出码 1"))
+
+
+class CacheMergeTest(unittest.TestCase):
+    """几个 `cca ls` 和 watchdog 同时刷缓存：各写各的号，旧条目不许盖掉新条目。"""
+
+    def setUp(self):
+        import tempfile  # noqa: PLC0415
+        self.f = Path(tempfile.mkdtemp()) / "usage-cache.json"
+
+    def test_merge_keeps_other_profiles(self):
+        usage.merge_cache(self.f, {"b001": {"windows": {}, "fetched_at": 10}})
+        usage.merge_cache(self.f, {"b002": {"windows": {}, "fetched_at": 11}})
+        self.assertEqual(set(usage.read_cache(self.f)), {"b001", "b002"})
+
+    def test_older_entry_does_not_overwrite_newer(self):
+        usage.merge_cache(self.f, {"b001": {"windows": {"x": 1}, "fetched_at": 20}})
+        usage.merge_cache(self.f, {"b001": {"windows": {"x": 0}, "fetched_at": 10}})
+        self.assertEqual(usage.read_cache(self.f)["b001"]["fetched_at"], 20)
+
+    def test_concurrent_writers_lose_nothing(self):
+        import threading  # noqa: PLC0415
+        names = [f"p{i}" for i in range(20)]
+        threads = [threading.Thread(target=usage.merge_cache,
+                                    args=(self.f, {n: {"windows": {}, "fetched_at": 1}}))
+                   for n in names]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(set(usage.read_cache(self.f)), set(names))
+        self.assertEqual(oct(self.f.stat().st_mode & 0o777), "0o600")
+        self.assertEqual([p.name for p in self.f.parent.glob("*.tmp")], [])

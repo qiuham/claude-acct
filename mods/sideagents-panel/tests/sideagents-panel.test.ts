@@ -5,6 +5,7 @@ import { checkMark, columnWidths } from '../hooks/list-pane.js'
 import { ccaCompletions } from '../hooks/cca-command.js'
 import { otherTasksText } from '../hooks/register.js'
 import { QUOTA_POLL_MS, parseHint, parseQuota, withHint } from '../hooks/quota-hint.js'
+import { transcriptEvents, workflowGroups, durationText } from '../hooks/workflow-view.js'
 import { activityOf, inboxSignalOf, waitingWhat, headerMeta, whoOf, statusText, arrowTarget, recallStep, bandLayout, compactCount, displayWidth, elapsedText, foldTasks, footerRows, taskKind, workflowCounts, progressBar } from '../hooks/register.js'
 
 const HOME = '/home/test'
@@ -2362,4 +2363,98 @@ rawTest('quota hint: cca decides when to ask next; junk falls back to the defaul
   expect(parseQuota('{"warn":false,"next_check_seconds":1}').nextMs).toBe(QUOTA_POLL_MS)
   expect(parseQuota('{"warn":false}').nextMs).toBe(QUOTA_POLL_MS)
   expect(parseQuota('oops')).toEqual({ hint: null, nextMs: QUOTA_POLL_MS })
+})
+
+
+// ---- 工作流详情页
+
+const WF_ITEMS = [
+  { type: 'workflow_phase', index: 1, title: '读代码' },
+  { type: 'workflow_phase', index: 2, title: '复核' },
+  { type: 'workflow_agent', index: 1, phaseIndex: 1, phaseTitle: '读代码', label: 'read:a', agentId: 'aaa1',
+    model: 'gpt-6-astra', state: 'done', toolCalls: 12, tokens: 29000, durationMs: 48000 },
+  { type: 'workflow_agent', index: 2, phaseIndex: 1, phaseTitle: '读代码', label: 'read:b', agentId: 'aaa2',
+    state: 'progress', lastToolName: 'Bash', lastToolSummary: 'sed -n 1,20p x.md', startedAt: 0 },
+  { type: 'workflow_agent', index: 3, phaseIndex: 2, phaseTitle: '复核', label: 'check', agentId: 'aaa3',
+    state: 'error', error: '超时' },
+]
+
+test('工作流分组：按阶段列子代理，记号、模型、工具、词元、用时；在跑的写最近一步，出错的写原因', () => {
+  const groups = workflowGroups(WF_ITEMS, 60000)
+  expect(groups.map((one) => one.title + ' ' + one.counts)).toEqual(['读代码 1/2', '复核 1/1'])
+  const [done, running] = groups[0].agents
+  expect(done.mark + ' ' + done.label + '  ' + done.meta).toBe('✓ read:a  gpt-6-astra  12 工具  29.0k tok  48 秒')
+  expect(running.mark).toBe('●')
+  expect(running.detail).toBe('Bash(sed -n 1,20p x.md)')
+  expect(groups[1].agents[0].detail).toBe('超时')
+  expect(durationText(185000)).toBe('3 分 5 秒')
+})
+
+test('子代理对话记录 → 面板事件：说的话、思考、工具调用和输出，都挂在这个子代理下', () => {
+  const text = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: '算出来的任务' } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: '先看看' },
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls  -la' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: 'a.py' }] }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: '结论：有 1 个文件' }] } }),
+    '坏行',
+  ].join('\n')
+  const events = transcriptEvents(text, 'aaa1')
+  expect(events.map((ev: any) => ev.kind)).toEqual(['think', 'tool', 'tool_result', 'say'])
+  expect(events[1]).toMatchObject({ name: 'Bash', summary: 'ls -la', parent: 'aaa1' })
+  expect(events[2]).toMatchObject({ id: 't1', text: 'a.py' })
+})
+
+test('工作流那一行能点进去：按阶段列子代理；再点一个子代理看它每一步', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME, CLAUDE_CODE_SESSION_ID: SID })
+  on('command.register', () => ({ value: undefined }))
+  on('session.start', () => ({ cwd: HOME }))
+  on('ui.render', () => ({ type: 'Text', props: {}, children: ['x'] }))
+  on('fs.list', () => ({ value: [{ name: 'ds#aaa.json', kind: 'file', size: 10, isLink: false }] }))
+  on('fs.exists', () => ({ value: true }))
+  const events = [
+    { kind: 'tool', name: 'Workflow', id: 'tW', input: {} },
+    { kind: 'bgtask', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow', tool_use_id: 'tW', workflow_name: '审查' },
+    { kind: 'bgtask', subtype: 'task_progress', task_id: 'w1', workflow_counts: { total: 3, done: 1, error: 1, phase: '复核' } },
+  ]
+  const transcript = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: '读完了 a 文件' }] } })
+  on('fs.read', ($: any, e: any) => {
+    if (e.path.endsWith('/workflows/w1.json')) return { value: JSON.stringify({ task_id: 'w1', items: WF_ITEMS }) }
+    if (e.path === '/tmp/agent-aaa1.jsonl') return { value: transcript }
+    if (e.path.endsWith('.json')) return { value: JSON.stringify({ owner_session: SID, started: 0 }) }
+    if (e.path.endsWith('.events')) return { value: events.map((ev) => JSON.stringify(ev)).join('\n') + '\n' }
+    if (e.path.endsWith('.progress')) return { value: 'TASK 审查\n' }
+    return { value: '' }
+  })
+  on('process.run', ($: any, e: any) => {
+    const found = e.argv.join(' ') === 'cca sideagent workflow-transcript ds#aaa aaa1'
+    return { value: { exitCode: found ? 0 : 1, stdout: found ? '/tmp/agent-aaa1.jsonl\n' : '', stderr: '' } }
+  })
+  const opened: any[] = []
+  on('ui.open', ($: any, e: any) => { opened.push(e); return { value: { isPlaced: true } } })
+  on('ui.panes', () => ({ value: [] }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: HOME })
+  await clock.advance(1500)
+  const band = await $.ui.mount({ ...SITE, surface: 'terminal' })
+  await band.press({ key: 'peer-ds#aaa' })
+  await band.unmount()
+  const peer = await $.ui.mount({ plugin: 'sideagents-panel', component: 'Pane', requestId: 'peer-ds-aaa', viewport: { columns: 120, rows: 40 }, props: { title: 'ds#aaa', bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 60 }, view: {} }, surface: 'terminal' })
+  expect(await hasTask(peer, /^◯ Workflow\(审查\)/)).toBe(true)
+  await peer.press({ key: 'agent-peer-ds-aaa-0' })
+  const wfOpen = opened.at(-1)
+  expect(wfOpen.id).toBe('wf-ds-aaa-w1')
+  await peer.unmount()
+  const wf = await $.ui.mount({ plugin: 'sideagents-panel', component: 'Pane', requestId: wfOpen.id, viewport: { columns: 120, rows: 40 }, props: { title: 'w', bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 60 }, view: {} }, surface: 'terminal' })
+  expect(await wf.find({ type: 'Text', text: /^读代码  1\/2$/ })).toBeDefined()
+  expect(await wf.find({ type: 'Text', text: /✓ read:a  gpt-6-astra/ })).toBeDefined()
+  expect(await wf.find({ type: 'Text', text: /超时/ })).toBeDefined()
+  await wf.press({ key: 'wfa-wf-ds-aaa-w1-aaa1' })
+  const agentOpen = opened.at(-1)
+  expect(agentOpen.id).toBe('agent-wf-aaa1')
+  await wf.unmount()
+  const agent = await $.ui.mount({ plugin: 'sideagents-panel', component: 'Pane', requestId: 'agent-wf-aaa1', viewport: { columns: 120, rows: 40 }, props: { title: 'a', bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 60 }, view: {} }, surface: 'terminal' })
+  // 说的话照主界面用 Markdown 画
+  const said = await agent.find({ type: 'Markdown' })
+  expect(String(said?.props?.text || '')).toContain('读完了 a 文件')
 })

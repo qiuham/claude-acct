@@ -820,6 +820,23 @@ class SettleBeforeRestartTest(_ServerCase):
         self.assertFalse(inbox.settle_one("ds#old", ""))
 
 
+class WorkflowTranscriptTest(_ServerCase):
+    """面板点进工作流的子代理：按 sideagent 的会话编号找到它的对话记录。"""
+
+    def test_finds_transcript_by_session_and_agent(self):
+        home = Path(self.tmp.name) / "home"
+        found = home / ".claude-accounts" / "ds" / "projects" / "-w" / "s-1" / "subagents" / "workflows" / "wf_1"
+        found.mkdir(parents=True)
+        (found / "agent-abc123.jsonl").write_text("{}\n", encoding="utf-8")
+        sideagent._write_state("ds#w", {"pid": 1, "session_id": "s-1"})  # noqa: SLF001
+        out = io.StringIO()
+        with mock.patch.object(Path, "home", return_value=home), contextlib.redirect_stdout(out):
+            self.assertEqual(sideagent_cli._workflow_transcript_command(["ds#w", "abc123"]), 0)  # noqa: SLF001
+        self.assertTrue(out.getvalue().strip().endswith("agent-abc123.jsonl"))
+        with mock.patch.object(Path, "home", return_value=home):
+            self.assertEqual(sideagent_cli._workflow_transcript_command(["ds#w", "../x"]), 1)  # noqa: SLF001
+
+
 class InterruptServerTest(_ServerCase):
     def test_interrupt_when_busy_marks_the_turn(self):
         self.server.busy = True

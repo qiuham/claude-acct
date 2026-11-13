@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import fcntl
 import json
 import os
 import re
@@ -62,8 +63,7 @@ def usage_windows(utilization) -> dict:
         }
     return windows
 
-def read_usage_cache() -> dict:
-    f = usage_cache_file()
+def read_cache(f: Path) -> dict:
     if not f.is_file():
         return {}
     try:
@@ -72,14 +72,34 @@ def read_usage_cache() -> dict:
         return {}
     return data if isinstance(data, dict) else {}
 
-def write_usage_cache(data: dict) -> None:
-    f = usage_cache_file()
+def merge_cache(f: Path, updates: dict) -> None:
+    """把这次刷新到的号并进缓存文件；别的号原样保留。
+
+    `cca ls`（可能好几个终端同时开）和 watchdog 都在刷这两份缓存：整份读、整份写会让
+    后写的人拿自己开头读到的旧条目盖掉别人刚刷的新条目。所以写之前加锁重读，每个号只在
+    更新时才替换，再用临时文件 + rename 落盘，读的人不会读到写了一半的文件。
+    """
+    if not updates:
+        return
     try:
         f.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        f.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        f.chmod(0o600)
+        with f.with_name(f.name + ".lock").open("a", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = read_cache(f)
+            for name, entry in updates.items():
+                old = data.get(name)
+                if not isinstance(old, dict) \
+                        or float(entry.get("fetched_at") or 0) >= float(old.get("fetched_at") or 0):
+                    data[name] = entry
+            tmp = f.with_name(f"{f.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            tmp.chmod(0o600)
+            tmp.replace(f)
     except OSError:
         pass                      # 缓存写不了不影响显示
+
+def read_usage_cache() -> dict:
+    return read_cache(usage_cache_file())
 
 def _oauth_block(name: str) -> dict:
     """读凭据里的 `claudeAiOauth` 块。只在进程内用：不打印、不落盘。"""
@@ -175,29 +195,13 @@ def fetch_subscription_live(name: str) -> tuple:
 
 
 def read_subscription_cache() -> dict:
-    f = subscription_cache_file()
-    if not f.is_file():
-        return {}
-    try:
-        data = json.loads(f.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-def write_subscription_cache(data: dict) -> None:
-    f = subscription_cache_file()
-    try:
-        f.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        f.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        f.chmod(0o600)
-    except OSError:
-        pass
+    return read_cache(subscription_cache_file())
 
 def live_subscriptions(names: list, *, force: bool) -> dict:
     """取订阅信息，和 `live_usage` 同一套：TTL 内用缓存，过期的并行刷新。"""
     cache = read_subscription_cache()
     now = time.time()
-    result, need = {}, []
+    result, need, updates = {}, [], {}
     for name in names:
         entry = cache.get(name)
         fresh = isinstance(entry, dict) and _has_subscription_data(entry) \
@@ -215,9 +219,8 @@ def live_subscriptions(names: list, *, force: bool) -> dict:
                 except Exception:  # noqa: BLE001 - 线程里出什么事都不许拖垮面板
                     sub = {}
                 if _has_subscription_data(sub):
-                    result[name] = {**sub, "fetched_at": now}
-                    cache[name] = {**sub, "fetched_at": now}
-        write_subscription_cache(cache)
+                    result[name] = updates[name] = {**sub, "fetched_at": now}
+        merge_cache(subscription_cache_file(), updates)
     return result
 
 def profile_subscription(name: str) -> dict:
@@ -310,7 +313,7 @@ def live_usage(names: list, *, force: bool) -> tuple:
     """
     cache = read_usage_cache()
     now = time.time()
-    result, need, failures = {}, [], {}
+    result, need, failures, updates = {}, [], {}, {}
     for name in names:
         entry = cache.get(name)
         fresh = isinstance(entry, dict) and isinstance(entry.get("windows"), dict) \
@@ -336,11 +339,10 @@ def live_usage(names: list, *, force: bool) -> tuple:
                     windows, why = {}, f"{type(exc).__name__}"
                 if windows:
                     result[name] = {"windows": windows, "fetched_at": now, "source": "live"}
-                    cache[name] = {"windows": windows, "fetched_at": now}
+                    updates[name] = {"windows": windows, "fetched_at": now}
                 elif why:
                     failures[name] = why
-    if need:
-        write_usage_cache(cache)
+    merge_cache(usage_cache_file(), updates)
     return result, failures
 
 def usage_snapshot(name: str) -> dict:
