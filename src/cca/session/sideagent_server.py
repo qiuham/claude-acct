@@ -18,8 +18,8 @@ from contextlib import suppress
 from pathlib import Path
 
 from cca.errors import say
+from cca.session import inbox, summary
 from cca.session import sideagent as core
-from cca.session import summary
 
 
 class _SideagentServer:
@@ -109,12 +109,18 @@ class _SideagentServer:
         self.permission_mode = "bypass"
         self.last_activity = time.time()
         self.stop_flag = threading.Event()
+        # 收到 SIGTERM（被停掉）：退出时手上的活记成 stopped，不是失败
+        self.stop_requested = False
+        # 串起“取走要不要回报 → 通知存好”：轮次结束、卡住收尾、退出收尾三处互斥，同一轮只回报一次
+        self.finish_lock = threading.Lock()
         self.process: subprocess.Popen | None = None
         self.server: socket.socket | None = None
 
     def run(self) -> None:
-        # run/ 只在跑的时候有：上次没收拾干净的先清掉
+        # run/ 只在跑的时候有：上次没收拾干净的先清掉；上次留下的“主会话在退出”标记也删掉
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        with suppress(OSError):
+            inbox.owner_ending_path(self.name).unlink()
         with suppress(OSError):
             self.socket_path.unlink()
         from cca.api.client import api_launch_args  # noqa: PLC0415 - 只有守护进程要
@@ -348,60 +354,42 @@ class _SideagentServer:
         """照 Claude Code 子代理的完成通知（task-notification）写：编号、状态、一句摘要、结果、用量。"""
         title = (os.environ.get("CCA_DESCRIPTION") or os.environ.get("CCA_LABEL")
                  or self.turn_task[:60] or self.name)
-        words = {"completed": "finished", "failed": f"failed: {error or 'Unknown error'}",
-                 "killed": "was stopped"}
-        note = (f"每次它停下来都会回报一次。要接着问它，用 sideagent_send 发给 {self.name}"
-                "（它退出了也能接着，上下文还在）。")
-        parts = ["<task-notification>", f"<task-id>{self.name}</task-id>", f"<status>{status}</status>",
-                 f"<summary>{_escape_xml(f'Agent {chr(34)}{title}{chr(34)} {words.get(status, status)}')}</summary>",
-                 f"<note>{_escape_xml(note)}</note>"]
-        if text:
-            parts.append(f"<result>{_escape_xml(text[:core.NOTIFY_RESULT_CHARS])}</result>")
-        if usage:
-            parts.append(f"<usage><subagent_tokens>{usage.get('tokens', 0)}</subagent_tokens>"
-                         f"<tool_uses>{usage.get('tool_uses', 0)}</tool_uses>"
-                         f"<duration_ms>{usage.get('duration_ms', 0)}</duration_ms></usage>")
-        parts.append("</task-notification>")
-        return "\n".join(parts)
+        return inbox.notification_text(self.name, title, status=status, text=text, usage=usage, error=error)
 
-    def _notify_main(self, text: str, *, status: str = "completed", usage: dict | None = None,
-                     error: str = "") -> None:
-        """把这一轮的结果直接投到主会话的消息通道。不经过模型，不靠提示词。"""
+    def _notify_main(self, text: str, *, status: str = "completed", usage: dict | None = None,  # noqa: PLR0913
+                     error: str = "", job: str = "", settle: bool = False, push: bool = True) -> None:
+        """一件活结束：经唯一出口（inbox.finalize）存一条通知，再马上推到主会话的消息通道。
+
+        推不到（主会话关了、socket 没了）通知就留在收件箱里，主会话的面板来取；同一件活只存一条。
+        """
         if not self.instance_socket:
             self._read_own_identity()
-        # 每次投递前都现查：主会话可能换了编号、换了 socket，不能用起进程时记下的
-        if not self._refresh_caller():
-            self.caller_socket = ""
-        if not self.caller_socket:
-            # 别悄悄跳过：写一行原因，查“为什么没回报”时一看就知道
-            self._note_text(f"NOTIFY skip 找不到主会话的消息 socket（登记表 {self.caller_sessions}，"
-                            f"进程 {self.owner['pid'] or '?'} 和会话 {self.owner['session'] or '?'} "
-                            "都没有登记条目：主会话已经关了，或者重开时换成了另一段对话）")
-            return
         if not text and status == "completed":
             # 做完了也要说一声（以前跳过，主会话就一直等）。走到这里说明这一轮一句话都没说过
             text = (f"这一轮结束了，但它没有写任何文字结论（调了 {self.turn_tool_uses} 次工具）。"
                     "要结论可以再问它一句。")
-        sender = f"uds:{self.instance_socket}"
-        notice = self._notification(text, status=status, usage=usage or {}, error=error)
-        body = (
-            f'<cross-session-message from="{sender}" from-name="{self.instance_name or self.name}"'
-            f' from-mode="{self.permission_mode}" cca-instance="{self.name}">\n{notice}\n'
-            "</cross-session-message>"
-        )
-        frame = {"msgV": 1, "msg_id": str(uuid.uuid4()), "type": "user",
-                 "message": {"role": "user", "content": body},
-                 "priority": "next", "from": sender}
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(3)
-        try:
-            sock.connect(self.caller_socket)
-            sock.sendall((json.dumps(frame, ensure_ascii=False) + "\n").encode("utf-8"))
+        # 每次投递前都现查：主会话可能换了编号、换了 socket，不能用起进程时记下的
+        entry = self._refresh_caller()
+        if not entry:
+            self.caller_socket = ""
+        session = str(entry.get("sessionId") or "") or self.owner["session"]
+        notice = {"text": self._notification(text, status=status, usage=usage or {}, error=error),
+                  "sender": f"uds:{self.instance_socket}", "instance_name": self.instance_name or self.name,
+                  "permission_mode": self.permission_mode,
+                  "caller_agent": os.environ.get("CCA_CALLER_AGENT") or ""}
+        posted = inbox.finalize(self.name, job, session=session, status=status, notice=notice, settle=settle)
+        if posted is None:
+            self._note_text(f"NOTIFY skip 这件活已经通知过（{job or '这一轮'}）" if session
+                            else "NOTIFY skip 不知道主会话是谁，没处存")
+            return
+        # 主会话自己在退出（会话结束时 stop-owned 停它）：别往正在关的会话推，存着等它续上时面板来取
+        if push and inbox.owner_ending_path(self.name).exists():
+            push = False
+        if push and inbox.push(posted, self.caller_socket):
             self._note_text("NOTIFY ok")
-        except OSError as exc:
-            self._note_text(f"NOTIFY fail {type(exc).__name__}")
-        finally:
-            sock.close()
+            return
+        # 推不到：通知留在收件箱，面板看到收件箱里有文件就来取
+        self._note_text(f"NOTIFY queued 主会话现在收不到，通知存在 {posted.parent}，等它来取")
 
     def _read_claude(self) -> None:
         if self.process is None or self.process.stdout is None:
@@ -439,6 +427,10 @@ class _SideagentServer:
                 return
             if stage == "started" and not entry.get("started"):
                 entry["started"] = True
+                if entry.get("notify") and not self.notify_turn:
+                    # 要回报的插话并进了一轮本来不用回报的（例如面板里打的话）：这一轮结束时替它回报
+                    self.notify_turn = True
+                    self.current_job = self.current_job or str(entry.get("job") or "")
                 self._note_event({"kind": "task", "text": entry["text"], "interject": True})
                 self._note_text(f"TASK （插话）{entry['text']}")
             elif stage in ("completed", "cancelled", "failed"):
@@ -446,16 +438,16 @@ class _SideagentServer:
 
     def _after_interrupt(self, response: dict) -> None:
         """打断后 claude 会说哪些排着的消息还留着；没留下的插话就不再等它开轮。"""
-        if not str(response.get("request_id") or "").startswith("int-"):
+        if not str(response.get("request_id") or "").startswith("interrupt-"):
             return
         kept = (response.get("response") or {}).get("still_queued")
         if not isinstance(kept, list):
             return
         keep = {str(item.get("uuid") if isinstance(item, dict) else item) for item in kept}
         with self.lock:
-            for key in [key for key, entry in self.injected.items()
-                        if not entry.get("started") and key not in keep]:
-                self.injected.pop(key, None)
+            dropped = [self.injected.pop(key) for key, entry in list(self.injected.items())
+                       if not entry.get("started") and key not in keep]
+        self._report_dropped(dropped, status="interrupted")
 
     def _note_system(self, event: dict) -> None:
         """system 事件：API 重试、后台任务名单、后台任务的开始/进度/结束。"""
@@ -845,6 +837,17 @@ class _SideagentServer:
         failed = bool(event.get("is_error")) and not self.turn_interrupted
         failure_text = self._failure_text(event) if failed else ""
         self._clear_api_retry()
+        # 从“取走要不要回报”到“通知存好”一口气做完：退出收尾（_finish_open）同时来，也只有一边回报
+        with self.finish_lock:
+            self._settle_turn(target, event, failed=failed, failure_text=failure_text)
+        if target is not None:
+            with suppress(OSError):
+                target.close()
+        if not self._begin_followup():
+            self._dispatch()
+
+    def _settle_turn(self, target: socket.socket | None, event: dict, *, failed: bool, failure_text: str) -> None:
+        """这一轮结束：放开忙碌、按 keep 安排退出、记任务、经唯一出口回报。调用方拿着 finish_lock。"""
         with self.lock:
             self.current = None
             self.busy = False
@@ -856,32 +859,26 @@ class _SideagentServer:
             # 有人在等、结果却没送到（例如 MCP 服务重启，等结果的线程跟着没了）：
             # 没人会写任务记录、回报、安排退出，这里自己做
             lost = self.turn_waited and target is None and not followup
+            if lost:
+                # 等结果的调用方断了：没人拿得到结果，就算它没要回报也通知一次
+                want_notify = True
             self.turn_waited = False
             job = self.current_job
             if not self.turn_keep:
                 self.exit_at = time.time() + core.LINGER_SECONDS
         if lost:
             self._finish_job(job, event)
-        # 记下这一轮的结果是不是已经交给等着的调用方；
-        # “有人在等”的由界面叫醒主代理
-        # 插话自己的那一轮、调用方断了由这里直接回报的，也算“已交回”，界面就不再叫一遍
-        self._update_state(delivered_to_caller=target is not None or followup or (lost and want_notify),
-                           notify=want_notify, busy=False, turn_started=0, waiting_background=0)
-        # 把“要叫醒”也写进进度：老面板只看进度文件
+        self._update_state(notify=want_notify, busy=False, turn_started=0, waiting_background=0)
         if want_notify:
-            with suppress(OSError), self.progress.open("a", encoding="utf-8") as handle:
-                handle.write("NOTIFY 1\n")
-        if want_notify and (target is not None or followup or lost):
-            if failed:
+            # 不管谁在等、等的人还在不在，要回报的活结束了就经唯一出口通知一次
+            if self.turn_interrupted:
+                self._notify_main(str(event.get("result") or ""), status="interrupted",
+                                  usage=self._usage_of(event), job=job)
+            elif failed:
                 # CC 自己放弃（重试用完、鉴权失败等）：以 failed 回报，带真实错误
-                self._notify_main("", status="failed", error=failure_text, usage=self._usage_of(event))
+                self._notify_main("", status="failed", error=failure_text, usage=self._usage_of(event), job=job)
             else:
-                self._notify_main(str(event.get("result") or ""), usage=self._usage_of(event))
-        if target is not None:
-            with suppress(OSError):
-                target.close()
-        if not self._begin_followup():
-            self._dispatch()
+                self._notify_main(str(event.get("result") or ""), usage=self._usage_of(event), job=job)
 
     def _failure_text(self, event: dict) -> str:
         """result 带 is_error：CC 自己放弃了这一轮。取它给的真实错误，附上最后一次 api_retry。"""
@@ -929,8 +926,10 @@ class _SideagentServer:
                 return False
             self.busy = True
             self.current = None
-            self.notify_turn = any(entry.get("notify") for entry in waiting)
-            self.current_job = ""
+            notifying = [entry for entry in waiting if entry.get("notify")]
+            self.notify_turn = bool(notifying)
+            # 用插话自己的任务编号：同一件活只通知一次靠它
+            self.current_job = str((notifying or waiting)[0].get("job") or "")
             self.followup_turn = True
         self._start_turn_books()
         self._update_state(busy=True, turn_started=self.turn_started,
@@ -946,14 +945,25 @@ class _SideagentServer:
             if not (self.followup_turn and self.busy) or self.held is not None:
                 # 压着结果等后台的那一轮是真有的一轮，不是“没开成的插话轮”
                 return
+            if any(entry.get("started") for entry in self.injected.values()):
+                # claude 已经报了插话开始：这一轮真开了，只是第一个字慢；真卡住由 _stalled/_give_up 收尾
+                return
             if time.time() - self.last_output <= core.FOLLOWUP_GRACE:
                 return
             self.busy = False
             self.followup_turn = False
             self.notify_turn = False
+            dropped = list(self.injected.values())
             self.injected.clear()
         self._update_state(busy=False, turn_started=0)
+        self._report_dropped(dropped, status="failed", error="claude 没有处理这条插话")
         self._dispatch()
+
+    def _report_dropped(self, entries: list, *, status: str, error: str = "") -> None:
+        """没被处理就丢掉的插话：要回报的各通知一次（被打断、没处理、sideagent 退出）。"""
+        for entry in entries:
+            if entry.get("notify"):
+                self._notify_main("", status=status, job=str(entry.get("job") or ""), settle=True, error=error)
 
     def _start_turn_books(self) -> None:
         """新一轮开始：清掉上一轮的账。"""
@@ -1096,16 +1106,21 @@ class _SideagentServer:
                                     ensure_ascii=False) + "\n")
         with suppress(OSError), self.progress.open("a", encoding="utf-8") as handle:
             handle.write(f"STUCK {text}\n")
+        self._update_state(busy=False, turn_started=0, stalled=text, api_retry="")
+        # 照子代理：失败也回报一次（status failed），主会话不用干等。
+        # 先存好通知再回调用方：调用方收到错误会补一条，看到已通知过就不补，同一件活只一条
+        with self.finish_lock:
+            with self.lock:
+                # 等结果的调用方已经断了：没人收得到错误，就算它没要回报也通知一次
+                notify = self.notify_turn or (self.turn_waited and self.current is None)
+                self.notify_turn = False
+            if notify:
+                self._notify_main(self.last_say, status="failed", error=text, job=self.current_job, settle=True,
+                                  usage={"tokens": self.token_count(), "tool_uses": self.turn_tool_uses,
+                                         "duration_ms": int((time.time() - self.turn_started) * 1000)})
         target = self.current
         if target is not None:
             _reply_error(target, text)
-        self._update_state(busy=False, turn_started=0, stalled=text, api_retry="")
-        # 照子代理：失败也回报一次（status failed），主会话不用干等
-        if self.notify_turn:
-            self.notify_turn = False
-            self._notify_main("", status="failed", error=text,
-                              usage={"tokens": self.token_count(), "tool_uses": self.turn_tool_uses,
-                                     "duration_ms": int((time.time() - self.turn_started) * 1000)})
 
     def _interrupt(self) -> bool:
         """打断当前这一轮，进程不退出。返回打断时是不是在干活。"""
@@ -1190,8 +1205,43 @@ class _SideagentServer:
     def _touch(self) -> None:
         self._update_state(last_activity=self.last_activity)
 
+    def _finish_open(self) -> None:
+        """要退出了：手上这一轮（含压着结果等后台的）和排着队的，凡是要回报的都通知一次。
+
+        被停掉（收到 SIGTERM）算 stopped；没人停、claude 自己退了算失败。
+        """
+        killed = self.stop_requested
+        status = "killed" if killed else "failed"
+        with self.finish_lock:
+            with self.lock:
+                busy, job = self.busy, self.current_job
+                # 等结果的调用方已经断了：没人收得到“停了”，就算它没要回报也通知一次
+                notify = self.notify_turn or (self.turn_waited and self.current is None)
+                held = self.held
+                queued = list(self.queue)
+                waiting = [entry for entry in self.injected.values() if not entry.get("started")]
+                self.queue.clear()
+                self.injected.clear()
+                self.notify_turn = False
+                self.busy = False
+            if busy and notify:
+                said = str((held or {}).get("result") or "") or self.last_say
+                self._notify_main(said, status=status, job=job, settle=True,
+                                  error="" if killed else "sideagent 的 claude 进程退出了，这一轮没做完")
+            for conn, _text, wants, queued_job, _keep in queued:
+                if wants:
+                    self._notify_main("", status=status, job=queued_job, settle=True,
+                                      error="" if killed else "sideagent 退出了，这条排着队还没开始")
+                if conn is not None:
+                    _reply_error(conn, "sideagent 停了，这条没开始")
+            for entry in waiting:
+                if entry.get("notify") and str(entry.get("job") or "") != job:
+                    self._notify_main("", status=status, job=str(entry.get("job") or ""), settle=True,
+                                      error="" if killed else "sideagent 退出了，这条插话还没开始")
+
     def _shutdown(self) -> None:
         self.stop_flag.set()
+        self._finish_open()
         self._unmirror()
         # 会话编号、代码版本记进留存的记录（追问接着开靠它）
         state = core._read_state(self.name)
@@ -1265,6 +1315,13 @@ def serve() -> None:
     """sideagent进程本体。参数：号、目录、闲置秒数、claude 参数。"""
     import signal  # noqa: PLC0415 - 只有守护进程要
 
-    signal.signal(signal.SIGTERM, lambda *_args: sys.exit(0))
     name, cwd, idle_seconds_text, *claude_args = sys.argv[1:]
-    _SideagentServer(name, cwd, int(idle_seconds_text), claude_args).run()
+    server = _SideagentServer(name, cwd, int(idle_seconds_text), claude_args)
+
+    def on_term(*_args) -> None:
+        # 不在信号里直接退出（会打断写文件）：只让主循环停下，退出前照常收尾、通知
+        server.stop_requested = True
+        server.stop_flag.set()
+
+    signal.signal(signal.SIGTERM, on_term)
+    server.run()

@@ -22,7 +22,6 @@ const LEASE_SECONDS = 10
 const TEXT_LIMIT = 48          // 横条一行放多少字
 const TICK_BUSY_MS = 500       // sideagent在跑时的刷新间隔
 const TICK_IDLE_MS = 1000      // 都闲着时的刷新间隔
-const NOTIFY_MAX = 50          // 记住多少个已通知的sideagent
 const BAND_WIDE = 80           // 横条宽度分档
 // bodyColumns 扣掉了引擎最右 5 格（折叠标记 [-]）。子代理列表只留 2 格边距，
 // 所以横条要多画 3 格，耗时列才和它对齐；压到 [-] 下面，难看就调回 0。
@@ -80,9 +79,7 @@ const openGroups = new Set()
 const view = { think: true, detail: true }
 
 // 已经通知过的sideagent，别重复记
-const notified = new Set()
 // 会话开起来的时间：比这更早结束的sideagent不叫醒主代理
-let bootAt = 0
 // 本会话有没有接管原生后台会话（sideagent_takeover）：有才每次刷新先同步一次
 let hasExternal = false
 // 额度快满的提醒（quota-hint.js）：最近一次 cca 给的提醒，和已经附给模型的
@@ -523,13 +520,13 @@ export function isAttached(state) {
 
 // 本会话名单：~/.cca/sessions/<会话编号>.json 的 agents（{名字: {kind, label, description, caller_agent}}）。
 // 会话编号会因为 /bg、← 换（原来那份对话写一行 continued-in）：一串编号的文件合起来算，我自己的条目优先
-async function readRoster($, home) {
-  const dir = home + '/.cca/sessions'
+// 本会话这一串编号（被继续、挪走过的老编号 + 现在的）：名单和收件箱都按这一串认
+async function rosterChain($, home) {
   let files = []
   try {
-    files = await $.fs.list(dir)
+    files = await $.fs.list(home + '/.cca/sessions')
   } catch {
-    return {}
+    files = []
   }
   const chain = []
   for (const file of files) {
@@ -539,6 +536,12 @@ async function readRoster($, home) {
     if (ownedByMe(session)) chain.push(session)
   }
   if (mySession) chain.push(mySession)
+  return chain
+}
+
+async function readRoster($, home) {
+  const dir = home + '/.cca/sessions'
+  const chain = await rosterChain($, home)
   const merged = {}
   for (const session of chain) {
     try {
@@ -678,8 +681,7 @@ async function readPeer($, folder, name, { state, note = {}, attached = false })
       label: label_,
       turnStarted: Number(state.turn_started || 0),
       started: Number(state.started || 0),
-      deliveredToCaller: Boolean(state.delivered_to_caller),
-      notify: Boolean(state.notify),
+      // 通知存进收件箱（主会话那时收不到）的时刻：变了就去收件箱取
       model: String(state.model || ''),
       external: attached,
       blocked,
@@ -793,9 +795,7 @@ async function lingeringOne($, folder, name, { state, note }) {
       callerAgent,
       model: String(note.model || state.model || ''),
       started: Number(state.started || 0),
-      deliveredToCaller: Boolean(state.delivered_to_caller),
       // 老进程退出时不写 delivered_to_caller，进度文件里那句 NOTIFY 才是可靠的
-      notify: Boolean(state.notify) || raw.includes('NOTIFY 1'),
       lines: raw.map(friendly).filter(Boolean).slice(-10),
       events,
     },
@@ -1520,9 +1520,8 @@ async function refresh($) {
   }
   await showNotices($)
   await closeGonePanes($, fresh)
-  // 刚接上的对话里早就做完的 sideagent 不算“刚做完”，不再叫醒主对话（和启动时一样）
-  if (switched) for (const row of fresh.rows) if (!row.running) notified.add(notifyKey(row.name, fresh.byName[row.name]))
-  wakeForFinished($, fresh)
+  // 有 sideagent 结束、或有通知存进收件箱：去收件箱取，送给主对话（换了会话也要取一次）
+  await drainInbox($, fresh, switched)
   const changed = !(same(fresh.rows, rows) && same(fresh.details, allDetails)
     && same(fresh.byName, byName))
   rows = fresh.rows
@@ -1548,12 +1547,6 @@ async function closeGonePanes($, fresh) {
   } catch {
     // 关不掉就算了
   }
-}
-
-// 有sideagent做完了就叫醒主代理一轮；结果已经当场交回的、常驻的不叫
-// 叫醒用的记号：接管的原生后台会话一直在，每做完一轮叫一次，所以带上这一轮的结束时刻
-export function notifyKey(name, entry) {
-  return entry?.external ? name + '@' + finishedAt(entry) : name
 }
 
 // 看门狗换号的通知（~/.cca/sideagents/notices.jsonl，一行一条 {at, text}）：面板启动以后新来的，弹一条提示。
@@ -1582,26 +1575,118 @@ async function showNotices($) {
   noticeLines = lines.length
 }
 
-function wakeForFinished($, fresh) {
-  for (const row of fresh.rows) {
-    const entry = fresh.byName[row.name] || {}
-    const key = notifyKey(row.name, entry)
-    if (row.running || notified.has(key)) continue
-    notified.add(key)
-    // 子代理派的：回报已经转给那个子代理，不叫醒主对话
-    if (entry.callerAgent) continue
-    if (!entry.notify || entry.deliveredToCaller) continue
-    if (finishedAt(entry) < bootAt) continue
-    const result = (entry.events || []).filter((ev) => ev.kind === 'result').pop()
-    const text = `sideagent ${row.name} 完成${row.meta ? ' · ' + row.meta : ''}`
-      + (result?.text ? `\n${result.text}` : '')
+// ---- 收件箱：sideagent 一件活结束，通知先存在 ~/.cca/inbox/<会话编号>/，sideagent 当场推一次；
+// 推不到（会话关了、消息 socket 没了）就留着。面板在会话开始、看到 sideagent 结束或有新存的通知时来取，
+// 送给主对话（是子代理派的就送给那个子代理）。取的时候先认领，送到才删，没送到放回去，所以只送一次。
+let inboxSignal = null
+let inboxBusy = null
+
+// 什么时候该去取：做完的 sideagent 名单、收件箱里待送的文件，有变化才去。
+// 做完的名单变了也要去：常驻进程被强杀、没来得及存通知的，取件时由 cca 补上
+export function inboxSignalOf(fresh, waiting = []) {
+  const done = fresh.rows.filter((row) => !row.running).map((row) => row.name).sort()
+  return done.join(',') + '|' + [...waiting].sort().join(',')
+}
+
+// 本会话这一串编号的收件箱里还没被认领的通知文件名
+async function inboxWaiting($) {
+  const home = await $.env.get('HOME')
+  if (!home) return []
+  const names = []
+  for (const session of await rosterChain($, home)) {
     try {
-      $.prompt.submit({ text }).catch(() => {})
+      for (const file of await $.fs.list(home + '/.cca/inbox/' + session)) {
+        if (String(file.name).endsWith('.json')) names.push(session + '/' + file.name)
+      }
     } catch {
-      // 提交失败不影响面板
+      // 还没有收件箱
     }
   }
-  if (notified.size > NOTIFY_MAX) notified.clear()
+  return names
+}
+
+async function drainInbox($, fresh, force = false) {
+  const signal = inboxSignalOf(fresh, await inboxWaiting($))
+  if (!force && signal === inboxSignal) return
+  inboxSignal = signal
+  // 这一次没办完（取件失败、有没送到放回去的）：清掉记号，下一次刷新照常再取，直到送到
+  const run = async () => { if (!(await takeInbox($))) inboxSignal = null }
+  // 上一次还没取完：等它取完再取一次，别并发认领
+  if (inboxBusy) {
+    inboxBusy = inboxBusy.then(run)
+    return
+  }
+  inboxBusy = run().finally(() => { inboxBusy = null })
+  await inboxBusy
+}
+
+// 送到了、但删收件箱文件没成功的：下次取件前先补删，免得会话重开后又送一遍
+const undone = []
+const INBOX_CLI_MS = 60000
+
+async function inboxCli($, args) {
+  try {
+    const out = await $.process.run(['cca', 'sideagent', 'inbox', ...args], { timeoutMs: INBOX_CLI_MS })
+    return out && Number(out.exitCode) === 0 ? out : null
+  } catch {
+    return null
+  }
+}
+
+// 取一次：认领、送、删（送不到放回）。全办完返回 true
+async function takeInbox($) {
+  const home = await $.env.get('HOME')
+  const sessions = home ? await rosterChain($, home) : [mySession].filter(Boolean)
+  if (!sessions.length) return true
+  if (undone.length && await inboxCli($, ['done', ...undone])) undone.length = 0
+  const items = parseTaken(await inboxCli($, ['take', ...sessions]))
+  if (!items) return false
+  let settled = undone.length === 0
+  for (const item of items) {
+    if (!(await settleNotice($, item))) settled = false
+  }
+  return settled
+}
+
+function parseTaken(out) {
+  try {
+    const items = out ? JSON.parse(String(out.stdout || '[]')) : null
+    return Array.isArray(items) ? items : null
+  } catch {
+    return null
+  }
+}
+
+// 送一条认领到的通知，送到删、送不到放回；都办妥返回 true
+async function settleNotice($, item) {
+  const claim = String(item?.claim || '')
+  const ok = await deliverNotice($, item?.notice || {})
+  if (await inboxCli($, [ok ? 'done' : 'release', claim])) return ok
+  // 送到了没删掉：记下来下次补删。没送到也没放回：认领人是本会话，会话重开时自动放回
+  if (ok) undone.push(claim)
+  return false
+}
+
+// 送一条通知：子代理派的先送给那个子代理，送不到退回主对话
+async function deliverNotice($, notice) {
+  const text = String(notice.text || '')
+  if (!text) return true
+  const agent = String(notice.caller_agent || '')
+  if (agent) {
+    try {
+      const sent = await $.session.send({ to: { agentId: agent }, text: `（来自 sideagent ${notice.name}）\n${text}` })
+      if (sent?.isDelivered) return true
+    } catch {
+      // 那个子代理不在了：退回主对话
+    }
+  }
+  try {
+    // 主对话不收（返回 drop）也算没送到：放回收件箱，下次再送
+    const got = await $.prompt.submit({ text: agent ? `（原本是给子代理 ${agent} 的）\n${text}` : text })
+    return !got?.drop
+  } catch {
+    return false
+  }
 }
 
 // 给sideagent说一句：只发不等。和主界面一样是插话：它在忙就送进这一轮，
@@ -1663,16 +1748,6 @@ async function openPeerPane($, peerName) {
   }
 }
 
-// 这个sideagent是什么时候做完的（秒）；没有结果事件就按 0
-function finishedAt(entry) {
-  const result = ((entry?.events) || []).filter((ev) => ev.kind === 'result').pop()
-  if (!result) return 0
-  // 新事件带绝对时间；老数据只能用“进程开始 + 这一轮用的秒数”估
-  if (typeof result.at === 'number') return result.at
-  if (typeof result.t !== 'number') return 0
-  const started = Number(entry.started || 0)
-  return started > 0 ? started + result.t : Date.now() / 1000
-}
 
 function same(a, b) {
   return JSON.stringify(a) === JSON.stringify(b)
@@ -2322,10 +2397,8 @@ export function register(on) {
     }
     // 记下本会话编号：面板只显示这个会话派的sideagent（每次刷新还会再问一次，见 refresh）
     mySession = await readSessionId($)
-    // 先定基准，开场那次刷新不算“刚做完”
-    bootAt = Date.now() / 1000
+    // 开场这次刷新会先取一次收件箱：会话关着时结束的 sideagent，通知都存在那里
     await refresh($)
-    for (const row of rows) if (!row.running) notified.add(notifyKey(row.name, byName[row.name]))
     // sideagent在干活时问得勤一点，闲下来就慢下来
     const tick = async () => {
       await refresh($)

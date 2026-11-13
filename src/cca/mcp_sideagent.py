@@ -35,7 +35,7 @@ from contextlib import redirect_stderr
 
 from cca.errors import die, say
 from cca.paths import global_config_file
-from cca.session import backends, jobs, sideagent, takeover
+from cca.session import backends, inbox, jobs, sideagent, takeover
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "sideagents"
@@ -441,9 +441,6 @@ def _send_job(arguments: dict) -> str:
                           interject=interject, keep=keep)
     finally:
         _remember_session(name)
-        # 干完就退，像子代理：同一个实例后面还有活（插话、排队）时 stop_later 会等它闲下来
-        if not keep:
-            sideagent.stop_later(name)
     if result.get("merged"):
         into = result.get("merged_into") or "?"
         return f"{name}: 插话已送进它正在跑的这一轮（任务 {into}），回应会写在那条任务的结果里。"
@@ -771,15 +768,31 @@ def _start_job(name: str, message: str, opts: dict) -> str:
                               "tool_uses": result.get("tool_uses"),
                               "token_count": result.get("token_count")})
         except Exception as exc:  # noqa: BLE001 - 后台任务，错误也要落盘
-            _write_job(name, {**base, "state": "failed",
-                              "error": f"{type(exc).__name__}: {exc}"})
+            error = f"{type(exc).__name__}: {exc}"
+            _write_job(name, {**base, "state": "failed", "error": error})
+            if notify:
+                # sideagent 没交结果就断了（进程被强杀等）：它自己没机会通知，这里经同一个出口补一条
+                _notify_lost(name, base["id"], message, error)
         finally:
             _remember_session(name)
-            # 干完就退，像子代理；同一个实例后面还有活时 stop_later 会等它闲下来
-            if not keep:
-                sideagent.stop_later(name)
+            # 干完就退由 sideagent 自己管（keep=False 时它这一轮结束后自己退），这里不再另起计时去停
     threading.Thread(target=run, daemon=True).start()
     return base["id"]
+
+
+def _notify_lost(name: str, job: str, message: str, error: str) -> None:
+    """sideagent 没机会自己通知的失败（连接断了还没交结果）：存一条通知、推给本会话。同一件活只会有一条。"""
+    me = jobs.me()
+    session = str(me.get("sessionId") or "")
+    title = " ".join(message.split())[:60]
+    state = sideagent._read_state(name)  # noqa: SLF001
+    notice = {"text": inbox.notification_text(name, title, status="failed", error=error),
+              "sender": f"uds:{state.get('instance_socket') or ''}", "instance_name": name,
+              "caller_agent": str(state.get("caller_agent") or "")}
+    posted = inbox.finalize(name, job, session=session, status="failed", notice=notice, settle=True)
+    if posted is not None:
+        # 推不到就留在收件箱，面板看到收件箱里有文件会来取
+        inbox.push(posted, str(me.get("messagingSocketPath") or ""))
 
 
 def _now() -> float:

@@ -78,24 +78,28 @@ def write_job(name: str, data: dict) -> None:
     """按任务编号合并进 <名字>/result.json，谁的结果都不会被后来的盖掉。"""
     path = core.job_path(name)
     with core._record_locked(name):
-        existing = core._read_record(path)
-        key = str(data.get("id") or "")
-        merged, replaced = [], False
-        for job in core.jobs_of(existing):
-            if key and str(job.get("id") or "") == key:
-                both = {**job, **data}
-                # 已经记成 stopped/interrupted 的，随后写的 failed/finished 不盖掉它
-                if job.get("state") in ("stopped", "interrupted"):
-                    both["state"] = job.get("state")
-                merged.append(both)
-                replaced = True
-            else:
-                merged.append(job)
-        if not replaced:
-            merged.append(data)
-        payload = {**{k: v for k, v in existing.items() if k not in ("jobs", "state")},
-                   "account": name, "jobs": merged[-core.JOB_HISTORY:]}
-        for field in ("owner_session", "owner_pid", "owner_proc_start", "session_id", "cwd"):
-            if data.get(field):
-                payload[field] = data[field]
-        core._write_record(path, payload)
+        core._write_record(path, merged_record(name, core._read_record(path), data))
+
+
+def merged_record(name: str, existing: dict, data: dict) -> dict:
+    """把一条任务（按编号）合进整份记录，返回新的整份。调用方要先拿着记录锁。"""
+    key = str(data.get("id") or "")
+    merged, replaced = [], False
+    for job in core.jobs_of(existing):
+        if key and str(job.get("id") or "") == key:
+            both = {**job, **data}
+            # 已经记成 stopped/interrupted 的，随后写的 failed/finished 不盖掉它
+            if job.get("state") in ("stopped", "interrupted"):
+                both["state"] = job.get("state")
+            merged.append(both)
+            replaced = True
+        else:
+            merged.append(job)
+    if not replaced:
+        merged.append(data)
+    payload = {**{k: v for k, v in existing.items() if k not in ("jobs", "state")},
+               "account": name, "jobs": merged[-core.JOB_HISTORY:]}
+    for field in ("owner_session", "owner_pid", "owner_proc_start", "session_id", "cwd"):
+        if data.get(field):
+            payload[field] = data[field]
+    return payload

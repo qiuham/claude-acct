@@ -5,7 +5,7 @@ import { checkMark, columnWidths } from '../hooks/list-pane.js'
 import { ccaCompletions } from '../hooks/cca-command.js'
 import { otherTasksText } from '../hooks/register.js'
 import { QUOTA_POLL_MS, parseHint, parseQuota, withHint } from '../hooks/quota-hint.js'
-import { activityOf, notifyKey, waitingWhat, headerMeta, whoOf, statusText, arrowTarget, recallStep, bandLayout, compactCount, displayWidth, elapsedText, foldTasks, footerRows, taskKind, workflowCounts, progressBar } from '../hooks/register.js'
+import { activityOf, inboxSignalOf, waitingWhat, headerMeta, whoOf, statusText, arrowTarget, recallStep, bandLayout, compactCount, displayWidth, elapsedText, foldTasks, footerRows, taskKind, workflowCounts, progressBar } from '../hooks/register.js'
 
 const HOME = '/home/test'
 const SID = 'sess-test'
@@ -861,7 +861,8 @@ test('两个子代理都在跑就显示两行，各一行高', async ($, on) => 
   expect(await pane.find({ key: 'agent-peer-ds-aaa-1' })).toBeDefined()
 })
 
-test('sideagent做完会叫醒主代理一次，只叫一次', async ($, on) => {
+// 收件箱：面板去取（cca sideagent inbox take），送给主对话，送到了 done，送不到 release
+function inboxPeer(on, { items = () => [] as any[], running = () => true, done = () => false, submitFails = false } = {}) {
   const clock = mock.clock(on)
   mock.env(on, { HOME, CLAUDE_CODE_SESSION_ID: SID })
   on('command.register', () => ({ value: undefined }))
@@ -871,38 +872,98 @@ test('sideagent做完会叫醒主代理一次，只叫一次', async ($, on) => 
     { name: 'ds#aaa.json', kind: 'file', size: 10, isLink: false },
     { name: 'ds#aaa.progress', kind: 'file', size: 10, isLink: false, mtimeMs: Date.now() },
   ] }))
-  let running = true
-  on('fs.exists', () => ({ value: running }))
-  let done = false
+  on('fs.exists', () => ({ value: running() }))
   const started = Math.floor(Date.now() / 1000)
   on('fs.read', ($, e) => {
-    if (e.path.endsWith('.json')) return { value: JSON.stringify({ owner_session: SID, started, state: 'running', notify: true }) }
+    if (e.path.endsWith('.json')) return { value: JSON.stringify({ owner_session: SID, started, state: 'running' }) }
     if (e.path.endsWith('.events')) {
-      return { value: [
-        JSON.stringify({ kind: 'task', text: '干活' }),
-        ...(done ? [JSON.stringify({ kind: 'result', text: '干完了', t: 10 })] : []),
-      ].join('\n') + '\n' }
+      return { value: [JSON.stringify({ kind: 'task', text: '干活' }),
+        ...(done() ? [JSON.stringify({ kind: 'result', text: '干完了', t: 10 })] : [])].join('\n') + '\n' }
     }
-    if (e.path.endsWith('.progress')) return { value: done ? 'RESULT 干完了\n' : 'TASK 干活\n' }
+    if (e.path.endsWith('.progress')) return { value: done() ? 'RESULT 干完了\n' : 'TASK 干活\n' }
     return { value: '' }
   })
+  const ran: string[][] = []
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    const take = e.argv.join(' ').startsWith('cca sideagent inbox take')
+    return { value: { exitCode: 0, stdout: take ? JSON.stringify(items()) : '', stderr: '' } }
+  })
   const submits: string[] = []
-  on('prompt.submit', ($, e) => { submits.push(String(e.text || '')); return { text: e.text } })
+  on('prompt.submit', ($, e) => {
+    if (submitFails) throw new Error('提交不了')
+    submits.push(String(e.text || ''))
+    return { text: e.text }
+  })
+  const takes = () => ran.filter((argv) => argv.join(' ').startsWith('cca sideagent inbox take'))
+  const acks = (kind: string) => ran.filter((argv) => argv.join(' ').startsWith('cca sideagent inbox ' + kind))
+  return { clock, ran, submits, takes, acks }
+}
 
+const NOTICE = { claim: '/inbox/s/ds#aaa~j1.json.taking-1',
+  notice: { name: 'ds#aaa', text: '<task-notification>干完了</task-notification>' } }
+
+test('sideagent 结束：面板去收件箱取通知，送给主对话一次，送到就删', async ($, on) => {
+  let finished = false
+  let left = [NOTICE]
+  const { clock, submits, takes, acks } = inboxPeer(on, {
+    items: () => { const out = finished ? left : []; if (finished) left = []; return out },
+    running: () => !finished, done: () => finished })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: HOME })
   await clock.advance(1500)
+  // 开场取过一次，收件箱是空的
+  expect(takes().length).toBe(1)
   expect(submits.length).toBe(0)
+  finished = true
+  await clock.advance(1500)
+  expect(submits).toEqual(['<task-notification>干完了</task-notification>'])
+  expect(acks('done').map((argv) => argv.at(-1))).toEqual([NOTICE.claim])
+  // 没有新变化就不再去取
+  const before = takes().length
+  await clock.advance(4000)
+  expect(takes().length).toBe(before)
+  expect(submits.length).toBe(1)
+})
 
-  done = true
-  running = false
+test('会话关着时结束的 sideagent：一开场就从收件箱补送', async ($, on) => {
+  let left = [NOTICE]
+  const { clock, submits, acks } = inboxPeer(on, {
+    items: () => { const out = left; left = []; return out }, running: () => false, done: () => true })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: HOME })
   await clock.advance(1500)
   expect(submits.length).toBe(1)
-  expect(submits[0]).toContain('sideagent ds#aaa 完成')
-  expect(submits[0]).toContain('干完了')
+  expect(acks('done').length).toBe(1)
+})
 
-  // 再刷几轮也不重复叫
-  await clock.advance(4000)
-  expect(submits.length).toBe(1)
+test('送不到主对话：放回收件箱（release），不删', async ($, on) => {
+  let left = [NOTICE]
+  const { clock, acks } = inboxPeer(on, {
+    items: () => { const out = left; left = []; return out }, running: () => false, done: () => true,
+    submitFails: true })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: HOME })
+  await clock.advance(1500)
+  expect(acks('release').length).toBe(1)
+  expect(acks('done').length).toBe(0)
+})
+
+test('送不到放回以后：下一次刷新再去取（不用等别的变化）', async ($, on) => {
+  // 放回去的通知下次照样取得到；主对话一直不收，面板就每次刷新都再试
+  const { clock, takes, acks } = inboxPeer(on, {
+    items: () => [NOTICE], running: () => false, done: () => true, submitFails: true })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: HOME })
+  await clock.advance(1500)
+  const before = takes().length
+  await clock.advance(3000)
+  expect(takes().length).toBeGreaterThan(before)
+  expect(acks('release').length).toBeGreaterThan(1)
+  expect(acks('done').length).toBe(0)
+})
+
+test('收件箱的取件信号：做完的名单或收件箱里待送的文件变了才变', () => {
+  const a = inboxSignalOf({ rows: [{ name: 'x', running: true }] }, [])
+  expect(inboxSignalOf({ rows: [{ name: 'x', running: true }] }, [])).toBe(a)
+  expect(inboxSignalOf({ rows: [{ name: 'x', running: true }] }, ['s/x~j1.json'])).not.toBe(a)
+  expect(inboxSignalOf({ rows: [{ name: 'x', running: false }] }, [])).not.toBe(a)
 })
 
 test('详情底下的输入框能把话发给sideagent', async ($, on) => {
@@ -931,9 +992,11 @@ test('详情底下的输入框能把话发给sideagent', async ($, on) => {
   const pane = await $.ui.mount({ plugin: 'sideagents-panel', component: 'Pane', requestId: 'peer-ds-aaa', viewport: { columns: 100, rows: 30 }, props: { title: 'ds#aaa', bodyColumns: 80, placement: 'inline', scroll: { offset: 0, bodyRows: 20 }, view: {} }, surface: 'terminal' })
   expect(await pane.find({ type: 'Input', key: 'reply-peer-ds-aaa' })).toBeDefined()
   await pane.input({ key: 'reply-peer-ds-aaa', text: '再数一遍' })
-  expect(ran.length).toBe(1)
+  // 开场还会去取一次收件箱，这里只看发话的那条
+  const tells = ran.filter((argv) => argv[2] === 'tell')
+  expect(tells.length).toBe(1)
   // 回车是插话，和主界面忙时打字一样
-  expect(ran[0]).toEqual(['cca', 'sideagent', 'tell', '--interject', 'ds#aaa', '再数一遍'])
+  expect(tells[0]).toEqual(['cca', 'sideagent', 'tell', '--interject', 'ds#aaa', '再数一遍'])
   // 发出去的话挂在输入框上方，等它在下一个工具边界接住
   expect(await pane.find({ type: 'Text', text: /^> 再数一遍  插话中$/ })).toBeDefined()
 })
@@ -1032,38 +1095,6 @@ test('宽表格按面板宽度截断，不折行', async ($, on) => {
   // 长格子被截断，出现省略号；表格仍是三行
   expect(text).toContain('…')
   expect(text.split('\n').length).toBe(3)
-})
-
-test('对端退出后，进度文件里的 NOTIFY 也能叫醒主对话', async ($, on) => {
-  const clock = mock.clock(on)
-  mock.env(on, { HOME, CLAUDE_CODE_SESSION_ID: SID })
-  on('command.register', () => ({ value: undefined }))
-  on('session.start', () => ({ cwd: HOME }))
-  on('ui.render', () => ({ type: 'Text', props: {}, children: ['x'] }))
-  on('fs.list', () => ({ value: [
-    { name: 'ds#aaa.progress', kind: 'file', size: 10, isLink: false, mtimeMs: Date.now() },
-  ] }))
-  on('fs.exists', () => ({ value: false }))
-  const finishedAt = Math.floor(Date.now() / 1000)
-  on('fs.read', ($, e) => {
-    if (e.path.endsWith('.progress')) {
-      return { value: 'TASK 干活\nRESULT 干完了 · 1.0 秒\nNOTIFY 1\n' }
-    }
-    if (e.path.endsWith('.events')) {
-      return { value: JSON.stringify({ kind: 'result', text: '干完了', at: finishedAt + 10 }) + '\n' }
-    }
-    if (e.path.endsWith('.owner')) {
-      return { value: JSON.stringify({ session: SID, account: 'ds' }) }
-    }
-    return { value: '' }
-  })
-  const submits: string[] = []
-  on('prompt.submit', ($, e) => { submits.push(String(e.text || '')); return { text: e.text } })
-
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: HOME })
-  await clock.advance(1500)
-  expect(submits.length).toBe(1)
-  expect(submits[0]).toContain('完成')
 })
 
 // 一个在忙的 sideagent：状态、事件、正在说的话都可以换
@@ -1916,14 +1947,11 @@ test('MCP 服务在同步（心跳 10 秒内）时，面板刷新不再自己起
   expect(ran.some((argv) => argv.join(' ').startsWith('cca sideagent bg-sync'))).toBe(false)
 })
 
-test('waitingWhat 写出卡住的工具；notifyKey 让接管的会话每做完一轮叫一次', () => {
+test('waitingWhat 写出卡住的工具', () => {
   const events = [{ kind: 'tool', name: 'Bash', id: 'a', summary: 'ls' }, { kind: 'tool_result', id: 'a' },
     { kind: 'tool', name: 'Edit', id: 'b', summary: '/x.py' }]
   expect(waitingWhat(events, {})).toContain('Edit(/x.py)')
   expect(waitingWhat([], { waiting_for: 'permission prompt' })).toContain('permission prompt')
-  const entry = { external: true, events: [{ kind: 'result', at: 100 }] }
-  expect(notifyKey('003#bg-x', entry)).toBe('003#bg-x@100')
-  expect(notifyKey('ds#1', { events: [] })).toBe('ds#1')
 })
 
 // 接管挑选框（/takeover、sideagent_takeover 没给会话）

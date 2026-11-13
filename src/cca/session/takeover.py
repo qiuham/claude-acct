@@ -39,7 +39,7 @@ from cca.config import (
 )
 from cca.errors import say
 from cca.paths import profile_dir
-from cca.session import roster, sideagent, summary
+from cca.session import inbox, roster, sideagent, summary
 from cca.session.push import session_name
 
 PROJECTS_DIR = Path("~/.claude/projects").expanduser()
@@ -957,6 +957,24 @@ def _scan(lines: list, state: dict) -> tuple[list, list, dict]:
     return events, notes, acc
 
 
+def _post_turn_end(name: str, state: dict, event: dict, offset: int) -> None:
+    """接管的会话一轮结束：给每个挂着它的主会话的收件箱存一条通知（面板来取）。
+
+    键用读到的位置：同一轮结束不管同步几次，都只有一条。
+    """
+    title = str(state.get("label") or state.get("title") or name)
+    usage = {"tokens": int(event.get("token_count") or 0), "tool_uses": 0,
+             "duration_ms": int(float(event.get("seconds") or 0) * 1000)}
+    text = inbox.notification_text(name, title, status="completed", text=str(event.get("text") or ""),
+                                   usage=usage)
+    for holder in roster.holders(name):
+        session = str(holder.get("session") or "")
+        if session:
+            # 面板看到收件箱里有文件就来取
+            inbox.post(session, {"key": inbox.key_of(name, f"turn-{offset}"), "name": name,
+                                 "job": f"turn-{offset}", "status": "completed", "text": text, "instance_name": name})
+
+
 def _turn_end(state: dict, events: list, now: float) -> tuple[dict, str]:
     """忙 → 闲：补一条结果（最后一句话），面板据此显示“完成”并叫醒主会话。"""
     last = next((e for e in reversed(events) if e["kind"] == "say" and not e.get("parent")), None) \
@@ -1059,7 +1077,7 @@ def _sync_one(name: str) -> dict:
         event, note = _turn_end(state, events, now)
         events.append(event)
         notes.append(note)
-        state["delivered_to_caller"] = False
+        _post_turn_end(name, state, event, offset)
     started = float(state.get("turn_started") or state.get("started") or now)
     _append(sideagent._events_path(name),  # noqa: SLF001
             [json.dumps({**e, "t": round(now - started, 1)}, ensure_ascii=False) for e in events])

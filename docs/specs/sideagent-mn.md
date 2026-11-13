@@ -26,6 +26,7 @@
     run/                      只在跑的时候有，停了整个删掉
       sock  live  result.lock 原来的 .sock、.live、.last.lock
   sessions/<主会话完整编号>.json   这个会话用着哪些 sideagent（只有这个会话自己写）
+  inbox/<主会话编号>/<名字>~<任务编号>.json   待送的结束通知：一件活一条；sideagent 存完马上推，推不到留着，主会话的面板来取（见 src/cca/session/inbox.py）
   sideagents/notices.jsonl、lineage.jsonl、perm/、main-session  照旧
 ```
 

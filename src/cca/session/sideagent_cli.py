@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -219,6 +220,11 @@ def stop_owned(session_id: str) -> int:
             continue
         if core._read_state(name).get("finished_at"):
             continue
+        # 主会话在退出：它收尾时的“已停”通知别往正在关的会话推，存进收件箱等续上时再送
+        from cca.session import inbox  # noqa: PLC0415
+
+        with suppress(OSError):
+            inbox.owner_ending_path(name).touch()
         core._stop([name])
         stopped += 1
     return stopped
@@ -354,7 +360,32 @@ def _hook_command(args: list) -> int:
     return 0
 
 
+def _inbox_command(args: list) -> int:
+    """主会话的面板来取通知：
+
+    cca sideagent inbox take <会话编号>...   认领这些会话收件箱里待送的通知，打印 JSON 列表
+    cca sideagent inbox done <认领文件>...    送到了：删掉
+    cca sideagent inbox release <认领文件>... 没送到：放回去，下次再送
+    认领人记成面板所在的 claude 进程：它死了，认领自动作废。
+    """
+    from cca.session import inbox  # noqa: PLC0415
+
+    action, rest = (args[0], args[1:]) if args else ("", [])
+    if action == "take":
+        # 认领人是面板所在的 claude 进程（往上找登记过的那个），不是中间可能马上退出的壳
+        taker = int(core.caller_now().get("pid") or 0) or os.getppid()
+        sys.stdout.write(json.dumps(inbox.take(rest, taker), ensure_ascii=False) + "\n")
+        return 0
+    if action in ("done", "release"):
+        for claimed in rest:
+            (inbox.done if action == "done" else inbox.release)(Path(claimed))
+        return 0
+    die("用法：cca sideagent inbox take <会话编号>... | done <认领文件>... | release <认领文件>...")
+    return 2
+
+
 SUBCOMMANDS = {
+    "inbox": _inbox_command,
     "permission-hook": _permission_hook_command,
     "permission-answer": _permission_answer_command,
     "hook": _hook_command,

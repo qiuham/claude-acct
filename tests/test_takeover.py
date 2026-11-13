@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import isolate  # noqa: E402,F401 - 先于 cca 导入：HOME 指到临时目录，测试不碰真实 ~/.claude-accounts
 
 from cca import mcp_sideagent  # noqa: E402
-from cca.session import roster, sideagent, takeover  # noqa: E402
+from cca.session import inbox, roster, sideagent, takeover  # noqa: E402
 
 sys.path.insert(0, str(REPO / "tests"))
 from sidehelp import write_roster  # noqa: E402
@@ -633,3 +633,19 @@ class ReuseAttachedTest(unittest.TestCase):
         with mock.patch.object(takeover, "release", return_value=0) as release:
             self.assertEqual(sideagent_cli._release_command(["005#bg-13ca09b7", "owner"]), 0)  # noqa: SLF001
         release.assert_called_once_with("005#bg-13ca09b7", "owner")
+
+
+class AttachedTurnEndNotifyTest(unittest.TestCase):
+    """接管的会话一轮结束：每个挂着它的主会话的收件箱里各一条；同一轮同步几次也只一条。"""
+
+    def test_each_holder_gets_one(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(inbox, "INBOX_DIR", Path(tmp) / "inbox"), \
+                mock.patch.object(takeover.roster, "holders", return_value=[{"session": "s1"}, {"session": "s2"}]):
+            state = {"label": "ham-25"}
+            event = {"text": "改完了", "token_count": 10, "seconds": 3}
+            takeover._post_turn_end("b005#bg-1", state, event, 4096)  # noqa: SLF001
+            takeover._post_turn_end("b005#bg-1", state, event, 4096)  # noqa: SLF001
+            self.assertEqual(len(inbox.pending(["s1"])), 1)
+            self.assertEqual(len(inbox.pending(["s2"])), 1)
+            self.assertIn("改完了", inbox.read(inbox.pending(["s1"])[0])["text"])

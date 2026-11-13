@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import isolate  # noqa: E402,F401 - 先于 cca 导入：HOME 指到临时目录，测试不碰真实 ~/.claude-accounts
 
 from cca import mcp_sideagent  # noqa: E402
-from cca.session import sideagent  # noqa: E402
+from cca.session import inbox, jobs, sideagent  # noqa: E402
 
 # 格式改了（一个 sideagent 一个文件夹）：sideagents 目录放在临时目录下一层，名单目录 sessions 和它同级
 
@@ -495,6 +495,30 @@ class MySessionTest(unittest.TestCase):
                 time.sleep(0.01)
             out = json.loads(mcp_sideagent._tool_result({"account": "ds#a", "job_id": job}))  # noqa: SLF001
         self.assertEqual((out["owner_session"], out["owner_pid"]), ("会话-新", 100))
+
+
+class LostJobNotifyTest(unittest.TestCase):
+    """sideagent 没交结果就断了（被强杀）：它自己没机会通知，派活这边补一条，只补一条。"""
+
+    def run_job(self, tmp, error):
+        with mock.patch.object(sideagent, "SIDEAGENT_DIR", _side(tmp)), \
+                mock.patch.object(inbox, "INBOX_DIR", Path(tmp) / "inbox"), \
+                mock.patch.object(jobs, "me", return_value={"sessionId": "会话-9", "messagingSocketPath": ""}), \
+                mock.patch.object(sideagent, "ask", side_effect=error):
+            mcp_sideagent._start_job("ds#a", "查一下日志", {})  # noqa: SLF001
+            import time  # noqa: PLC0415
+            for _ in range(200):
+                if inbox.pending(["会话-9"]):
+                    break
+                time.sleep(0.01)
+            return [inbox.read(path)["text"] for path in inbox.pending(["会话-9"])]
+
+    def test_connection_dropped_notifies_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            texts = self.run_job(tmp, sideagent.SideagentError("ds#a: 连接断了，没拿到结果"))
+        self.assertEqual(len(texts), 1)
+        self.assertIn("failed", texts[0])
+        self.assertIn("连接断了", texts[0])
 
 
 class ExitedRecordTest(unittest.TestCase):

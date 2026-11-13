@@ -779,6 +779,11 @@ def _ensure_started(name: str, cwd: str, idle_seconds: int, claude_args: list,  
     roster.cleanup()
     if running(name):
         return False
+    # 同名的旧进程死了却没收尾（被强杀）：先把它的活记成失败并通知，再起新的，
+    # 免得面板之后把正在起的新进程当成旧的死进程
+    from cca.session import inbox  # noqa: PLC0415 - inbox 反过来要用本模块
+
+    inbox.settle_one(name, "")
     account = _account_of(name)
     profile_dir(account).exists() or die(f"{account} 不是配置好的号")
     agent_dir(name).mkdir(parents=True, exist_ok=True)
@@ -1256,6 +1261,7 @@ from cca.session.sideagent_records import (  # noqa: E402, F401 - 同上
     _write_record,
     job_path,
     jobs_of,
+    merged_record,
     remember_instance,
     write_job,
 )

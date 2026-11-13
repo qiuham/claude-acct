@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -22,7 +23,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import isolate  # noqa: E402,F401 - 先于 cca 导入：HOME 指到临时目录，测试不碰真实 ~/.claude-accounts
 
-from cca.session import roster, sideagent, sideagent_cli  # noqa: E402
+from cca.session import inbox, roster, sideagent, sideagent_cli  # noqa: E402
 
 sys.path.insert(0, str(REPO / "tests"))
 from sidehelp import use_temp_root, write_roster, write_state  # noqa: E402
@@ -405,6 +406,10 @@ class _ServerCase(unittest.TestCase):
         patcher = mock.patch.object(sideagent, "SIDEAGENT_DIR", self.root)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # 每个用例一个收件箱，别互相看到对方存的通知
+        box = mock.patch.object(inbox, "INBOX_DIR", Path(self.tmp.name) / "inbox")
+        box.start()
+        self.addCleanup(box.stop)
         self.server = sideagent._SideagentServer("ds#t1", str(self.root), 60, [])  # noqa: SLF001
         self.server.process = _FakeProcess()
         sideagent._write_state("ds#t1", {"pid": 1})  # noqa: SLF001
@@ -657,6 +662,164 @@ class BackgroundHoldServerTest(_ServerCase):
         self.assertTrue(self.server._done_lingering())  # noqa: SLF001
 
 
+class ShutdownNotifyTest(_ServerCase):
+    """要退出了（被停、claude 退了）：手上这一轮和排队的，凡是要回报的都通知一次。"""
+
+    def setUp(self):
+        super().setUp()
+        self.server.owner = {"pid": 0, "proc_start": "", "session": "会话-1"}
+        self.server.caller_sessions = self.root / "没有登记表"
+
+    def notices(self):
+        return [inbox.read(path)["text"] for path in inbox.pending(["会话-1"])]
+
+    def test_stopped_while_working(self):
+        self.server.busy, self.server.notify_turn, self.server.current_job = True, True, "j1"
+        self.server.last_say = "查到第 3 个文件了"
+        self.server.stop_requested = True
+        self.server._finish_open()  # noqa: SLF001
+        [text] = self.notices()
+        self.assertIn("was stopped", text)
+        self.assertIn("查到第 3 个文件了", text)
+
+    def test_claude_died_is_failed(self):
+        self.server.busy, self.server.notify_turn, self.server.current_job = True, True, "j1"
+        self.server._finish_open()  # noqa: SLF001
+        [text] = self.notices()
+        self.assertIn("failed", text)
+        self.assertIn("claude 进程退出了", text)
+
+    def test_queued_jobs_are_notified_too(self):
+        self.server.queue.extend([(None, "第二件", True, "j2", True), (None, "不用回报", False, "j3", True)])
+        self.server.stop_requested = True
+        self.server._finish_open()  # noqa: SLF001
+        self.assertEqual(len(self.notices()), 1)
+        self.assertFalse(self.server.queue)
+
+    def test_held_result_is_the_conclusion(self):
+        self.server.busy, self.server.notify_turn, self.server.current_job = True, True, "j1"
+        self.server.held = {"type": "result", "result": "工作流已启动"}
+        self.server.stop_requested = True
+        self.server._finish_open()  # noqa: SLF001
+        self.assertIn("工作流已启动", self.notices()[0])
+
+    def test_idle_exit_sends_nothing(self):
+        self.server._finish_open()  # noqa: SLF001
+        self.assertEqual(self.notices(), [])
+
+    def test_already_notified_turn_is_not_repeated(self):
+        self.server._notify_main("做完了", job="j1")  # noqa: SLF001
+        self.server.busy, self.server.notify_turn, self.server.current_job = True, True, "j1"
+        self.server.stop_requested = True
+        self.server._finish_open()  # noqa: SLF001
+        self.assertEqual(len(self.notices()), 1)
+
+
+class InterjectNotifyTest(_ServerCase):
+    """插话要回报的，不管并进哪一轮、有没有开始、sideagent 退没退，都通知一次。"""
+
+    def setUp(self):
+        super().setUp()
+        self.server.owner = {"pid": 0, "proc_start": "", "session": "会话-1"}
+        self.server.caller_sessions = self.root / "没有登记表"
+
+    def notices(self):
+        return [inbox.read(path) for path in inbox.pending(["会话-1"])]
+
+    def lifecycle(self, key, state):
+        self.server._note_control(json.dumps({"type": "command_lifecycle", "command_uuid": key,  # noqa: SLF001
+                                              "state": state}))
+
+    def test_joins_a_turn_that_did_not_need_reporting(self):
+        # 面板里打的话开的一轮（不用回报），主会话插一句要回报的
+        self.server.busy, self.server.notify_turn, self.server.current_job = True, False, ""
+        self.server.injected["u1"] = {"text": "顺便查一下", "notify": True, "job": "j9", "started": False}
+        self.lifecycle("u1", "started")
+        self.server._end_turn(None, {"type": "result", "result": "查好了"})  # noqa: SLF001
+        [notice] = self.notices()
+        self.assertEqual(notice["job"], "j9")
+        self.assertIn("查好了", notice["text"])
+
+    def test_followup_turn_uses_the_interjects_job(self):
+        self.server.injected["u1"] = {"text": "再查", "notify": True, "job": "j7", "started": False}
+        self.assertTrue(self.server._begin_followup())  # noqa: SLF001
+        self.assertEqual(self.server.current_job, "j7")
+
+    def test_started_followup_is_not_dropped(self):
+        self.server.injected["u1"] = {"text": "再查", "notify": True, "job": "j7", "started": False}
+        self.server._begin_followup()  # noqa: SLF001
+        self.lifecycle("u1", "started")
+        self.server.last_output = 0
+        self.server._drop_empty_followup()  # noqa: SLF001
+        self.assertTrue(self.server.busy)
+
+    def test_unstarted_interject_reported_on_exit(self):
+        self.server.injected["u1"] = {"text": "再查", "notify": True, "job": "j7", "started": False}
+        self.server.stop_requested = True
+        self.server._finish_open()  # noqa: SLF001
+        [notice] = self.notices()
+        self.assertEqual((notice["job"], notice["status"]), ("j7", "killed"))
+
+    def test_owner_ending_keeps_notice_in_inbox(self):
+        inbox.owner_ending_path("ds#t1").touch()
+        self.server.busy, self.server.notify_turn, self.server.current_job = True, True, "j1"
+        self.server.caller_socket = "/不该推到这里.sock"
+        self.server.stop_requested = True
+        with mock.patch.object(inbox, "push") as push:
+            self.server._finish_open()  # noqa: SLF001
+        push.assert_not_called()
+        self.assertEqual(len(self.notices()), 1)
+
+    def test_owner_ending_also_holds_a_turn_that_just_ended(self):
+        # 会话结束时正好出了结果：照样只存不推
+        inbox.owner_ending_path("ds#t1").touch()
+        self.server.busy, self.server.notify_turn, self.server.current_job = True, True, "j1"
+        with mock.patch.object(inbox, "push") as push:
+            self.server._end_turn(None, {"type": "result", "result": "做完了"})  # noqa: SLF001
+        push.assert_not_called()
+        self.assertEqual(len(self.notices()), 1)
+
+    def test_stuck_with_caller_gone_still_notifies(self):
+        self.server.busy, self.server.notify_turn, self.server.turn_waited = True, False, True
+        self.server.current_job = "j6"
+        self.server._give_up()  # noqa: SLF001
+        self.assertEqual([one["job"] for one in self.notices()], ["j6"])
+
+    def test_lost_caller_always_notifies(self):
+        self.server.busy, self.server.notify_turn, self.server.turn_waited = True, False, True
+        self.server.current_job = "j5"
+        self.server._end_turn(None, {"type": "result", "result": "做完了"})  # noqa: SLF001
+        self.assertEqual([one["job"] for one in self.notices()], ["j5"])
+
+
+class SettleDeadTest(_ServerCase):
+    """主会话关着时 sideagent 被强杀：下次面板取件时补一条失败通知，并标成已结束。"""
+
+    def test_dead_agent_is_settled_once(self):
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        sideagent._write_state("ds#dead", {"pid": proc.pid, "description": "查日志"})  # noqa: SLF001
+        sideagent.write_job("ds#dead", {"id": "j1", "state": "running"})
+        roster.add({"session": "会话-1", "pid": 0, "proc_start": ""}, "ds#dead", "spawned")
+        taken = inbox.take(["会话-1"], 1)
+        self.assertEqual(len(taken), 1)
+        self.assertIn("进程没了", taken[0]["notice"]["text"])
+        self.assertTrue(sideagent._read_state("ds#dead").get("finished_at"))  # noqa: SLF001
+        self.assertEqual(inbox.take(["会话-1"], 1), [])
+
+
+class SettleBeforeRestartTest(_ServerCase):
+    def test_restart_settles_the_dead_one_first(self):
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        sideagent._write_state("ds#old", {"pid": proc.pid, "owner_session": "会话-2"})  # noqa: SLF001
+        sideagent.write_job("ds#old", {"id": "j1", "state": "running"})
+        self.assertTrue(inbox.settle_one("ds#old", ""))
+        self.assertEqual(len(inbox.pending(["会话-2"])), 1)
+        # 已经收过尾：再来一次什么都不做
+        self.assertFalse(inbox.settle_one("ds#old", ""))
+
+
 class InterruptServerTest(_ServerCase):
     def test_interrupt_when_busy_marks_the_turn(self):
         self.server.busy = True
@@ -749,7 +912,7 @@ class InjectServerTest(_ServerCase):
         self.server.injected["u3"] = {"text": "x", "notify": False, "job": "", "started": False}
         self.server._note_control(json.dumps({  # noqa: SLF001
             "type": "control_response",
-            "response": {"request_id": "int-1", "response": {"still_queued": []}}}))
+            "response": {"request_id": "interrupt-1", "response": {"still_queued": []}}}))
         self.assertNotIn("u3", self.server.injected)
 
 
@@ -1025,8 +1188,10 @@ class CallerByPidTest(_ServerCase):
         self.entry(4242, "别人的会话", "/x.sock", start="另一个进程")
         self.server._notify_main("做完了")  # noqa: SLF001
         progress = self.server.progress.read_text(encoding="utf-8")
-        self.assertIn("NOTIFY skip", progress)
-        self.assertIn("4242", progress)
+        # 不投给别人的会话；通知存在原来那段对话的收件箱里，等它来取
+        self.assertIn("NOTIFY queued", progress)
+        self.assertEqual(len(inbox.pending(["会话-1"])), 1)
+        self.assertEqual(inbox.pending(["别人的会话"]), [])
 
 
 class LifecycleTest(unittest.TestCase):
@@ -1287,7 +1452,6 @@ class CallerLostTest(CallerByPidTest):
         self.assertEqual(job["text"], "查完了：一共 3 处")
         # 2. 直接叫醒主会话，面板不用再叫一遍
         self.assertIn("查完了：一共 3 处", self.received(main)["message"]["content"])
-        self.assertTrue(sideagent._read_state("ds#t1")["delivered_to_caller"])  # noqa: SLF001
         # 3. keep=false：留一会儿就自己退出
         self.assertGreater(self.server.exit_at, 0)
         self.server.exit_at = time.time() - 1

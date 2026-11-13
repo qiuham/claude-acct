@@ -189,7 +189,8 @@ class InterruptedTurnTest(unittest.TestCase):
         with mock.patch.object(server, "_notify_main") as notify:
             server._end_turn(None, event)  # noqa: SLF001
         notify.assert_called_once()
-        self.assertNotIn("status", notify.call_args.kwargs)
+        # 被打断的那一轮：以 interrupted 回报，不说成失败，也不说成做完
+        self.assertEqual(notify.call_args.kwargs["status"], "interrupted")
 
 
 class GatewayEnvTest(unittest.TestCase):
