@@ -437,9 +437,17 @@ class JobLifecycleTest(unittest.TestCase):
         self.assertEqual(out["tokens_in"], 12300)
         self.assertEqual(out["token_count"], 9000)
 
+    def test_busy_old_version_still_says_interjected(self):
+        """“旧版”只说明代码改过：插话照样送进正在跑的这一轮，回话不能说成排到这一轮之后。"""
+        reply = mcp_sideagent._send_reply("ds#a", "j1", {"busy": True, "stale": True},  # noqa: SLF001
+                                          interject=True, new=False, resumed=False)
+        self.assertIn("下一个工具调用结束时送到", reply)
+        self.assertNotIn("排在后面", reply)
+
     def test_interject_note(self):
         note = mcp_sideagent._interject_note  # noqa: SLF001
-        self.assertIn("旧版本", note({"stale": True, "busy": True}))
+        # 旧版本进程也认插话：照样送进正在跑的这一轮
+        self.assertIn("正在跑的这一轮", note({"stale": True, "busy": True}))
         self.assertIn("正在跑的这一轮", note({"busy": True}))
         self.assertIn("闲着", note({"busy": False}))
 

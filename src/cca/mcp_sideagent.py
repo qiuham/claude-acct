@@ -329,7 +329,8 @@ def _send_reply(name: str, job: str, info: dict, *, interject: bool, new: bool, 
     if resumed:
         # 照 SendMessage 对已结束代理的回话（Resuming agent X）
         return (f"{name}: 正在用它的会话记录接着开（上下文还在），任务编号 {job}；做完会回报。{look}")
-    if info.get("busy") and interject and not info.get("stale"):
+    # 插话照样发给它（11-01 以后的进程都认插话）；“旧版”只说明代码改过，不等于不认插话
+    if info.get("busy") and interject:
         # 照 SendMessage 对正在跑的代理的回话
         return (f"{name}: 消息已排上，在它下一个工具调用结束时送到（任务编号 {job}）。"
                 "它要是先做完，会用这条消息接着开、做完再回报一次；等那条回报，别重发。")
@@ -341,8 +342,6 @@ def _send_reply(name: str, job: str, info: dict, *, interject: bool, new: bool, 
 
 def _interject_note(info: dict) -> str:
     """插话时说清楚：忙就并进这一轮，闲就当新的一轮。"""
-    if info.get("stale"):
-        return "（它是旧版本进程，不认插话，会按排队处理）"
     if info.get("busy"):
         return "（插话：送进它正在跑的这一轮，下一个工具调用结束就能看到）"
     return "（它闲着，插话就当成新的一轮）"

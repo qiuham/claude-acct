@@ -1127,7 +1127,7 @@ def status(name: str) -> dict:
             info["api_retry"] = str(state["api_retry"])
     if alive and info["code_version"] != CODE_VERSION:
         info["stale"] = True
-        info["stale_note"] = "旧版本，需重启：这个进程是改代码前起的，新功能（插话、回报修复等）用不上"
+        info["stale_note"] = "旧版本：这个进程是改代码前起的，最近改的修复它用不上；插话照常能用"
     return info
 
 
