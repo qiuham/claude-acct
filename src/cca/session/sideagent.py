@@ -48,7 +48,11 @@ PUSH_MIN_INTERVAL = 0.3
 LINGER_SECONDS = 15
 QUEUE_LIMIT = 20
 JOB_HISTORY = 20      # 每个实例留最近几条后台任务
+# 事件文件的滑动窗口：面板（Claude Code 插件）一次最多读 4 MiB，超了就读不出来、点开是黑的。
+# 超过 400 万字节时只留最新约 300 万字节（按整行切）；留出空余，免得每追加一行都重写整个文件。
+# 只是给界面看的副本：会话的上下文在 Claude Code 自己的对话记录里，不受影响。
 EVENTS_MAX_BYTES = 4_000_000
+EVENTS_KEEP_BYTES = 3_000_000
 # 一轮里多久没有任何输出就认定卡住。为什么是 900：Claude Code 自己会重试 API 错误，单次尝试
 # 最长的静默是等首字节——首次约 190 秒，重试时可到 599 秒（api_retry 的 no_response.retry_wait_ms），
 # 再加退避。门槛必须比这个大，否则 CC 还在重试、cca 就先放弃了（以前 300 秒，慢网关上常被误判）。
@@ -685,6 +689,37 @@ def _live_path(name: str) -> Path:
 def _events_path(name: str) -> Path:
     """一步一行 JSON，界面用来还原完整过程。"""
     return agent_dir(name) / "events.jsonl"
+
+
+def append_events(name: str, entries: list) -> None:
+    """往事件文件追加几条；文件超过 EVENTS_MAX_BYTES 就砍到最新的 EVENTS_KEEP_BYTES。"""
+    if not entries:
+        return
+    path = _events_path(name)
+    text = "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries)
+    with suppress(OSError):
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(text)
+        trim_events(path)
+
+
+def trim_events(path: Path, limit: int | None = None, keep: int | None = None) -> None:
+    """文件超过 limit 字节：只留最后 keep 字节里的整行，先写临时文件再改名（面板不会读到半个文件）。"""
+    limit = EVENTS_MAX_BYTES if limit is None else limit
+    keep = EVENTS_KEEP_BYTES if keep is None else keep
+    try:
+        size = path.stat().st_size
+        if size <= limit:
+            return
+        with path.open("rb") as handle:
+            handle.seek(size - keep)
+            tail = handle.read()
+        start = tail.find(b"\n") + 1
+        temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temp.write_bytes(tail[start:])
+        temp.replace(path)
+    except OSError:
+        return
 
 
 # 终端控制序列（改颜色、挪光标、OSC）和空字符等控制字符：工具读二进制文件时会带进输出，

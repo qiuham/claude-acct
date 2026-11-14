@@ -6,6 +6,7 @@ import contextlib
 import difflib
 import os
 import shutil
+import subprocess
 import sys
 import time
 import unicodedata
@@ -16,8 +17,8 @@ from cca.account.store import ensure_onboarding_flag, profile_kind
 from cca.api.client import api_launch_args, check_api_profile, identity_banner, models_banner
 from cca.config import COMMAND_USAGE, REMOVED_COMMANDS
 from cca.env import launch_env
-from cca.errors import die, note, say
-from cca.paths import repo_root
+from cca.errors import die, note, say, warn
+from cca.paths import profile_dir, repo_root
 
 
 def did_you_mean(word: str, options) -> str:
@@ -162,13 +163,71 @@ def cmd_run(name_or_none, claude_args: list) -> int:
     exe = shutil.which("claude")
     if not exe:
         die("找不到 claude 可执行文件，请确认已安装且在 PATH 中")
+    claude_args, pending = _keep_name_on_bg_resume(name, claude_args)
     claude_args = api_launch_args(name, claude_args)
     clear_stale_resume_job(name, claude_args)
     _sanitize_resume(name, claude_args)
     env = launch_env(name, claude_args)
     env.update(no_browser_env(name))          # 界面里用 /login 时也只打链接，不去 open 浏览器
+    if pending:
+        return _bg_resume_then_deliver(name, exe, claude_args, env, pending)
     os.execvpe(exe, [exe, *claude_args], env)  # noqa: S606 - 这里就是要用 claude 可执行文件替换当前进程
     return 0  # 不会到达
+
+# 不带值的 claude 选项：位置参数紧跟在它们后面时，一定是提示词而不是选项的值
+_BOOL_FLAGS = frozenset({"--bg", "--background", "--verbose", "--dangerously-skip-permissions",
+                         "--fork-session", "--ide", "--debug"})
+
+
+def _trailing_prompt(claude_args: list) -> str:
+    """参数最后的提示词；认不准（最后一个可能是某个选项的值）就当没有，原样放过。"""
+    if len(claude_args) < 2:  # noqa: PLR2004
+        return ""
+    last, prev = str(claude_args[-1]), str(claude_args[-2])
+    if last.startswith("-"):
+        return ""
+    return last if prev in _BOOL_FLAGS or not prev.startswith("-") else ""
+
+
+def _keep_name_on_bg_resume(name: str, claude_args: list) -> tuple[list, tuple]:
+    """`cca <号> --bg -r <编号> "<提示>"`：有名字的会话把启动提示换成 `/rename <原名>`，提示等登记好再投。
+
+    直接把提示当启动提示，CC 会按提示给会话另起名字、盖掉原名（11-14 closed-loop-engine 被别的会话
+    这样叫醒，变成 golden-block-digest-runfields）。返回 (改好的参数, (完整编号, 待投的话))；不用改返回原参数和空元组。
+    """
+    from cca.session.takeover import resume_launch  # noqa: PLC0415
+    from cca.session.transcript import find_transcript, resume_id  # noqa: PLC0415
+
+    session = resume_id(claude_args)
+    if not session or not any(a in ("--bg", "--background") for a in claude_args):
+        return claude_args, ()
+    prompt = _trailing_prompt(claude_args)
+    # 斜杠命令（如 /rename）只有当启动提示才执行，当消息送进去不执行：原样放过
+    if not prompt or prompt == session or prompt.startswith("/"):
+        return claude_args, ()
+    path = find_transcript(session, profile_dir(name) / "projects")
+    if path is None:
+        return claude_args, ()
+    launch, pending = resume_launch(name, path.stem, prompt, path=path)
+    if not pending:
+        return claude_args, ()
+    return [*claude_args[:-1], *launch], (path.stem, pending)
+
+
+def _bg_resume_then_deliver(name: str, exe: str, claude_args: list, env: dict, pending: tuple) -> int:
+    """后台续跑：先起（启动提示是 /rename），登记好以后把原提示作为消息送进去。"""
+    from cca.session.takeover import deliver_after_resume  # noqa: PLC0415
+
+    r = subprocess.run([exe, *claude_args], env=env, check=False)  # noqa: S603 - exe 来自 shutil.which
+    if r.returncode != 0:
+        return r.returncode
+    full, text = pending
+    error = deliver_after_resume(name, full, text)
+    if error:
+        warn(f"会话已续上，但提示没送进去：{error}；可以用 cca {name} attach {full[:8]} 自己发")
+        return 1
+    note(f"保留了原名，提示已作为消息送到 {full[:8]}")
+    return 0
 
 def _sanitize_resume(name: str, claude_args: list) -> None:
     """续会话前清掉 Anthropic 不认的字段（Gemini 历史里的 tool_use.signature）。
@@ -176,7 +235,6 @@ def _sanitize_resume(name: str, claude_args: list) -> None:
     会话还活着、或者目标本身是 Gemini 号时不清：前者会丢回合，后者删了签名
     Gemini 下一轮反而会 400。
     """
-    from cca.paths import profile_dir  # noqa: PLC0415
     from cca.session.transcript import (  # noqa: PLC0415 - 只在续会话时需要
         resume_id,
         session_live,

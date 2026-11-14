@@ -217,6 +217,40 @@ class TaskEventTest(unittest.TestCase):
         self.assertEqual(path.parent.name, "workflows")
 
 
+class EventsWindowTest(unittest.TestCase):
+    """事件文件是滑动窗口：超了上限只留最新的整行，面板（一次最多读 4 MiB）不会读不出来。"""
+
+    def test_trims_to_newest_whole_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_text("".join(f'{{"n": {i}}}\n' for i in range(1000)), encoding="utf-8")
+            sideagent.trim_events(path, limit=5000, keep=2000)
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertLessEqual(path.stat().st_size, 2000)
+            self.assertEqual(json.loads(lines[-1]), {"n": 999})
+            for line in lines:
+                json.loads(line)
+
+    def test_under_limit_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_text('{"n": 1}\n', encoding="utf-8")
+            sideagent.trim_events(path, limit=5000, keep=2000)
+            self.assertEqual(path.read_text(encoding="utf-8"), '{"n": 1}\n')
+
+    def test_append_keeps_window(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(sideagent, "SIDEAGENT_DIR", Path(tmp)), \
+                mock.patch.object(sideagent, "EVENTS_MAX_BYTES", 5000), \
+                mock.patch.object(sideagent, "EVENTS_KEEP_BYTES", 2000):
+            sideagent.agent_dir("ds#a").mkdir(parents=True)
+            for i in range(500):
+                sideagent.append_events("ds#a", [{"n": i}])
+            path = sideagent._events_path("ds#a")  # noqa: SLF001
+            self.assertLessEqual(path.stat().st_size, 5000)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8").splitlines()[-1]), {"n": 499})
+
+
 class PlainTextTest(unittest.TestCase):
     def test_tool_output_drops_control_codes(self):
         block = {"content": [{"type": "text", "text": "ok\x1b[23m\x00bin\x1b]0;t\x07\tend\n"}]}

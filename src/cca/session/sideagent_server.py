@@ -675,9 +675,7 @@ class _SideagentServer:
         if progress is not None:
             entry = {key: value for key, value in entry.items() if key != "workflow_progress"}
             self._save_workflow(entry.get("task_id") or "", progress)
-        entry = {**entry, "t": round(time.time() - self.turn_started, 1)}
-        with suppress(OSError), core._events_path(self.name).open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        core.append_events(self.name, [{**entry, "t": round(time.time() - self.turn_started, 1)}])
 
     def _save_workflow(self, task_id: str, progress: list) -> None:
         """工作流最新的完整进度：先写临时文件再改名，界面不会读到写了一半的。"""
@@ -690,17 +688,6 @@ class _SideagentServer:
             tmp.write_text(json.dumps({"task_id": task_id, "items": progress}, ensure_ascii=False),
                            encoding="utf-8")
             tmp.replace(path)
-
-    def _trim_events(self) -> None:
-        """事件文件太长就砍掉前面的，只留最近 2000 行，别让界面越读越慢。"""
-        path = core._events_path(self.name)
-        try:
-            if not path.exists() or path.stat().st_size <= core.EVENTS_MAX_BYTES:
-                return
-            kept = path.read_text(encoding="utf-8").splitlines()[-2000:]
-            path.write_text("\n".join(kept) + "\n", encoding="utf-8")
-        except OSError:
-            return
 
     def _save_tokens(self) -> None:
         """这一轮到现在的 ↑输入 ↓输出、横条那个数，写进状态文件给界面看。"""
@@ -1100,10 +1087,8 @@ class _SideagentServer:
         """卡住就收摊：写一行说明，叫醒等着的调用方，让界面看到原因，别一直挂着。"""
         seconds = int(time.time() - self.last_output)
         text = self._stall_text(seconds)
-        with suppress(OSError), core._events_path(self.name).open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"kind": "error", "text": text,
-                                     "t": round(time.time() - self.turn_started, 1)},
-                                    ensure_ascii=False) + "\n")
+        core.append_events(self.name, [{"kind": "error", "text": text,
+                                        "t": round(time.time() - self.turn_started, 1)}])
         with suppress(OSError), self.progress.open("a", encoding="utf-8") as handle:
             handle.write(f"STUCK {text}\n")
         self._update_state(busy=False, turn_started=0, stalled=text, api_retry="")
@@ -1184,9 +1169,7 @@ class _SideagentServer:
         with suppress(OSError):
             self.progress.write_text(f"TASK {task}\n{kept}", encoding="utf-8")
         # 追加，不重写：界面靠这个文件画整段对话，翻回去还能看到前面几轮
-        self._trim_events()
-        with suppress(OSError), core._events_path(self.name).open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"kind": "task", "text": task}, ensure_ascii=False) + "\n")
+        core.append_events(self.name, [{"kind": "task", "text": task}])
         self._clear_live()
         self._update_state(tokens=0, tokens_in=0, tokens_out=0, token_count=0, acted=False,
                            busy=True,

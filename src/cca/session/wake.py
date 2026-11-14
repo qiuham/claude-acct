@@ -273,10 +273,11 @@ def _wake(entry: dict, session: str, *, wait: float | None = None) -> str:
     except LaunchBlocked as exc:
         return str(exc)
     cwd = entry.get("cwd") if entry.get("cwd") and Path(entry["cwd"]).is_dir() else None
-    from cca.session.takeover import deliver_after_resume, resume_launch  # noqa: PLC0415
+    from cca.session.takeover import clear_stale_registrations, deliver_after_resume, resume_launch  # noqa: PLC0415
 
     # 有原名：启动提示是 /rename <原名>，NUDGE 等登记好再以消息送到；没名字照旧
     launch, pending = resume_launch(entry["account"], session, NUDGE)
+    clear_stale_registrations(entry["account"], session)
     log = _log_path().open("a", encoding="utf-8")
     try:
         subprocess.Popen(  # noqa: S603 - exe 来自 shutil.which

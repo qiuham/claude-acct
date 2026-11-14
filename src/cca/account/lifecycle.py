@@ -1003,32 +1003,6 @@ def _move_one(item: dict, target: str, prompt: str = "") -> str:
     return ""
 
 
-def _stale_registrations(account: str, full: str) -> list:
-    """这个号 sessions/ 里这条会话的登记文件中，进程已经不在的那些。
-
-    CC 判断「是不是还在跑」时，碰到验证不了的旧登记（例如容器重启前留下的、pid 命名空间不同）
-    会当它还在跑，于是续跑另起副本："session X is already running in the background, so this
-    started a copy"（11-11 train-h004 搬到 001 时连续 4 次被复制）。cca 这边看 pid 不在了就删掉。
-    """
-    out = []
-    for path in (profile_dir(account) / "sessions").glob("*.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict) or data.get("sessionId") != full:
-            continue
-        pid = int(data.get("pid") or 0)
-        if pid > 0:
-            try:
-                os.kill(pid, 0)
-                continue
-            except OSError:
-                pass
-        out.append(path)
-    return out
-
-
 COPY_RE = re.compile(r"started a copy as\s+([0-9a-fA-F][0-9a-fA-F-]{5,})")
 
 
@@ -1040,12 +1014,12 @@ def _resume_on(item: dict, target: str, launch: list) -> str:
     续之前先清掉目标号上的旧登记（只删面板条目，对话记录不动；带 worktree 的不删）；
     续完要是还复制了，把副本停掉删掉，按失败算（源号已停的由调用方回源号续上）。
     """
+    from cca.session.takeover import clear_stale_registrations  # noqa: PLC0415
+
     full = item["full"]
     if (profile_dir(target) / "jobs" / item["id"]).is_dir() and full not in live_session_ids(target):
         say(f"{item['id']}: {drop_entry(target, item['id'], full, why='目标号上的旧登记，留着续跑会另起一份副本')}")
-    for stale in _stale_registrations(target, full):
-        stale.unlink(missing_ok=True)
-        say(f"{item['id']}: 删掉了 {target} 上进程已不在的旧登记 {stale.name}（留着 CC 会当它还在跑、另起一份副本）")
+    clear_stale_registrations(target, full)
     try:
         r = _run_claude(api_launch_args(target, ["--bg", "--resume", full, *launch]),
                         target, capture=True, cwd=item["cwd"], session=True)

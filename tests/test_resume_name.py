@@ -453,7 +453,7 @@ class ResumeOnTargetTest(unittest.TestCase):
 
 
 class StaleRegistrationTest(unittest.TestCase):
-    def test_only_dead_registrations_of_this_session_are_listed(self):
+    def test_only_dead_registrations_of_this_session_are_removed(self):
         import os  # noqa: PLC0415
         full = "bb183830-0000"
         with tempfile.TemporaryDirectory() as tmp:
@@ -463,6 +463,23 @@ class StaleRegistrationTest(unittest.TestCase):
             (folder / "2.json").write_text(json.dumps({"sessionId": full, "pid": os.getpid()}), encoding="utf-8")
             (folder / "3.json").write_text(json.dumps({"sessionId": "other", "pid": 999999999}), encoding="utf-8")
             (folder / "4.json").write_text("{bad", encoding="utf-8")
-            with mock.patch.object(lifecycle, "profile_dir", side_effect=lambda n: Path(tmp) / n):
-                stale = lifecycle._stale_registrations("001", full)  # noqa: SLF001
-            self.assertEqual([p.name for p in stale], ["1.json"])
+            with mock.patch.object(takeover, "profile_dir", side_effect=lambda n: Path(tmp) / n):
+                removed = takeover.clear_stale_registrations("001", full)
+            self.assertEqual(removed, ["1.json"])
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), ["2.json", "3.json", "4.json"])
+
+    def test_every_resume_path_clears_stale_registrations_first(self):
+        """resume-bg / 发话唤醒（takeover._wake）和 cca wake（wake._wake）也要先清，不只换号。"""
+        seen = []
+        row = {"session_id": SID, "kind": "background", "account": "001", "cwd": ""}
+        done = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(takeover, "clear_stale_registrations",
+                               side_effect=lambda a, s: seen.append((a, s)) or []), \
+             mock.patch.object(takeover, "_claude", return_value="claude"), \
+             mock.patch.object(takeover, "resume_launch", return_value=([], "")), \
+             mock.patch.object(takeover, "registry_entry", return_value={"pid": 1}), \
+             mock.patch("cca.env.session_env", return_value={}), \
+             mock.patch("cca.session.transcript.target_needs_strip", return_value=False), \
+             mock.patch.object(takeover.subprocess, "run", return_value=done):
+            takeover._wake(row)  # noqa: SLF001
+        self.assertEqual(seen, [("001", SID)])

@@ -540,6 +540,36 @@ def deliver_after_resume(account: str, session: str, text: str, *, sender: dict 
         time.sleep(REGISTER_POLL)
 
 
+def clear_stale_registrations(account: str, full: str) -> list:
+    """删掉这个号 sessions/ 里这条会话、进程已经不在的登记文件；返回删掉的文件名。
+
+    每条续跑（换号、wake、resume-bg、发话唤醒）启动前都要调：CC 判断「是不是还在跑」时，
+    碰到验证不了的旧登记（容器 / workspace 重启前留下的，pid 在新环境里不存在）会当它还在跑，
+    于是另起一份新编号的副本："session X is already running in the background, so this started
+    a copy"（11-11 train-h004 换号连续被复制 4 次；11-13 换 workspace 后 resume-bg 把 transfer-weka
+    复制了两份）。
+    """
+    removed = []
+    for path in (profile_dir(account) / "sessions").glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("sessionId") != full:
+            continue
+        pid = int(data.get("pid") or 0)
+        if pid > 0:
+            try:
+                os.kill(pid, 0)
+                continue
+            except OSError:
+                pass
+        path.unlink(missing_ok=True)
+        removed.append(path.name)
+        say(f"{full[:8]}: 删掉了 {account} 上进程已不在的旧登记 {path.name}（留着 CC 会当它还在跑、另起一份副本）")
+    return removed
+
+
 def resume_quietly(account: str, session_id: str, cwd: str = "") -> str:
     """在原号把一条后台会话重新挂上：编号、名字、原设置都不变，不跑模型。返回错误，空串是成功。"""
     return _wake({"account": account, "session_id": session_id, "kind": "background", "cwd": cwd})
@@ -552,6 +582,7 @@ def _wake(row: dict) -> str:
         return f"会话编号不完整：{row['session_id']}，要完整编号才能原样接着跑"
     # 有名字时启动提示换成 /rename 保住原名；用户的话唤醒后由外层 deliver，这里不用管 pending
     launch, _pending = resume_launch(str(row["account"]), row["session_id"])
+    clear_stale_registrations(str(row["account"]), str(row["session_id"]))
     cmd = [_claude(), "--bg", "--resume", row["session_id"], *launch]
     if row["kind"] != "background":
         # 普通会话：没有存下的设置，接着跑时一律全部自动批准，后台不会卡在等确认
@@ -1079,8 +1110,7 @@ def _sync_one(name: str) -> dict:
         notes.append(note)
         _post_turn_end(name, state, event, offset)
     started = float(state.get("turn_started") or state.get("started") or now)
-    _append(sideagent._events_path(name),  # noqa: SLF001
-            [json.dumps({**e, "t": round(now - started, 1)}, ensure_ascii=False) for e in events])
+    sideagent.append_events(name, [{**e, "t": round(now - started, 1)} for e in events])
     _append(sideagent._progress_path(name), notes)  # noqa: SLF001
     says = [e for e in events if e["kind"] == "say" and not e.get("parent")]
     if says:
