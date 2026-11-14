@@ -179,7 +179,7 @@ def _is_claude_process(proc: Path) -> bool:
 
     只按 `CLAUDE_CONFIG_DIR` 认进程会把别的号的后台脚本（`sleep`、看门狗 shell）当成
     会话：这些脚本从父 shell 继承了配置目录，还常自带 `TZ=Asia/Shanghai`，于是合法
-    会话被误判成"时区不对"，handoff / takeover 全被拦住。真会话的 argv 是
+    会话被误判成"时区不对"，handoff / attach 全被拦住。真会话的 argv 是
     `claude …`；npm 安装的老版本是 `node …/claude-code/cli.js`。
     """
     try:
@@ -233,7 +233,7 @@ def session_env(name: str) -> dict:
     """起 claude 会话用的完整环境：代理、地区检查、语言、时区、遥测。
 
     **所有起会话的路径都必须走这里。** 只走 build_env() 的路径既不拦不支持的地区、
-    也不设出口时区：handoff / takeover / wake / watchdog 以前就是这么漏掉的。
+    也不设出口时区：handoff / attach / wake / watchdog 以前就是这么漏掉的。
 
     探测按代理在进程内缓存，一个进程里同一个出口只查一次。
     """

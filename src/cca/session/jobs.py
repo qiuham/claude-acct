@@ -67,7 +67,7 @@ def is_mine(data: dict) -> bool:
 
 
 def owns(name: str, mine: dict | None = None) -> bool:
-    """这个 sideagent 是不是本会话用着的（派出的或接管的）。
+    """这个 sideagent 是不是本会话用着的（派出的或挂上的）。
 
     先看本会话自己的名单（一串编号合起来，见 roster.mine）；谁的名单里都没有它的（老数据、
     不在会话里起的），退回看它自己记的主人（is_mine）。不在会话里调（命令行直接跑）按可见处理。

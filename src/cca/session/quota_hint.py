@@ -24,7 +24,6 @@ import os
 import time
 from pathlib import Path
 
-
 # 用到多少开始提醒（%），按窗口分：越晚本号剩下的越少（浪费越少），但要留出做完这一步、换号的余地。
 # 不等到撞墙：撞墙后模型调不了 API，没法自己换号，「撞墙」的报错也不一定每次都有。
 # 5 小时窗口涨得快（几条会话一起用，几分钟就是几个点），95%；7 天窗口涨得慢，98% 也来得及。
@@ -356,7 +355,7 @@ def _session_kind(account: str, session: str) -> str:
     """这条会话是后台会话（bg）还是交互会话：看原号登记表。认不出当后台。"""
     if not session:
         return "bg"
-    from cca.session.takeover import registry_entry  # noqa: PLC0415
+    from cca.session.attach import registry_entry  # noqa: PLC0415
 
     return str(registry_entry(account, session).get("kind") or "bg")
 

@@ -54,7 +54,7 @@ def _ago(item: dict) -> str:
 
 def _last_ask(item: dict) -> str:
     """人最后交给这个会话的那句话；读不到就空着。"""
-    from cca.session.takeover import last_ask  # noqa: PLC0415 - takeover 很重，用到才导入
+    from cca.session.attach import last_ask  # noqa: PLC0415 - attach 很重，用到才导入
 
     try:
         return last_ask(item["full"])

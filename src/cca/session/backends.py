@@ -4,12 +4,12 @@
 
 - 常驻进程（ProcessBackend）：`cca sideagent serve` 包着 claude 跑，我们自己的套接字、
   任务记录（`<名字>/result.json`），派活有任务编号。state.json 里 kind=spawned。
-- 接管的原生会话（TakenOverBackend）：Claude Code 自己的后台会话（`claude --bg`），我们只
-  读它的对话记录、发跨会话消息；主会话退出时不停它（见 takeover）。kind=attached，
-  可以同时被好几个主会话接管。
+- 挂上的原生会话（AttachedBackend）：Claude Code 自己的后台会话（`claude --bg`），我们只
+  读它的对话记录、发跨会话消息；主会话退出时不停它（见 attach）。kind=attached，
+  可以同时被好几个主会话挂上。
 
 调用方（MCP 工具、命令行、主会话收工）只问 `backend_for(名字)` 要实现，不再到处写
-“如果是接管的会话就……”。实例种类记在状态文件的 `kind` 里，没有就是常驻进程。
+“如果是挂上的会话就……”。实例种类记在状态文件的 `kind` 里，没有就是常驻进程。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import json
 import time
 
 from cca.config import ROSTER_ADOPT_SECONDS
-from cca.session import jobs, roster, sideagent, takeover
+from cca.session import attach, jobs, roster, sideagent
 
 
 class Backend:
@@ -119,17 +119,17 @@ class ProcessBackend(Backend):
         return f"{name}: 已打断这一轮，进程还在，可以接着发；这条任务记成 interrupted"
 
 
-class TakenOverBackend(Backend):
+class AttachedBackend(Backend):
     kind = roster.ATTACHED
     outlives_owner = True
     takes_jobs = False
     needs_sync = True
 
     def tell(self, name: str, text: str, *, interject: bool = False) -> str:  # noqa: ARG002 - 原生消息本来就是插话
-        return takeover.tell(name, text, sideagent.caller_now())
+        return attach.tell(name, text, sideagent.caller_now())
 
     def status(self, name: str) -> dict:
-        state = takeover.sync_one(name)
+        state = attach.sync_one(name)
         # shell：会话停在终端里（例如刚跑完 ! 命令），人没在等它，按空闲算，不是结束
         word = {"busy": "running", "waiting": "blocked", "idle": "idle", "shell": "idle"}.get(
             str(state.get("status")), "ended")
@@ -139,25 +139,25 @@ class TakenOverBackend(Backend):
                 "token_count": state.get("token_count") or 0,
                 "last_say": (state.get("last_say") or {}).get("text", "")[:2000]}
 
-    def result(self, name: str, job_id: str = "") -> dict:  # noqa: ARG002 - 接管的会话没有任务编号
+    def result(self, name: str, job_id: str = "") -> dict:  # noqa: ARG002 - 挂上的会话没有任务编号
         return self.status(name)
 
     def stop(self, name: str) -> str:
-        return (f"{name} 是接管的原生后台会话，不归 sideagent 停；"
-                "要停用 claude stop <编号>，只从本会话的面板拿掉用 sideagent_release")
+        return (f"{name} 是挂上的原生后台会话，不归 sideagent 停；"
+                "要停用 claude stop <编号>，只从本会话的面板拿掉用 sideagent_detach")
 
     def interrupt(self, name: str) -> str:
-        return f"{name} 是接管的原生后台会话，打断不了；要停用 claude stop，要拿掉用 sideagent_release"
+        return f"{name} 是挂上的原生后台会话，打断不了；要停用 claude stop，要拿掉用 sideagent_detach"
 
     def sync(self, name: str, *, summarize: bool = False) -> dict:
-        state = takeover.sync_one(name)
+        state = attach.sync_one(name)
         # 进度短语要调小模型，另起线程；只在常驻的同步线程里做（命令行兜底的 bg-sync 一下就退）
-        if summarize and takeover.summary_due(state, time.time()):
-            takeover.summarize_later(name)
+        if summarize and attach.summary_due(state, time.time()):
+            attach.summarize_later(name)
         return state
 
 
-BACKENDS = {backend.kind: backend for backend in (ProcessBackend(), TakenOverBackend())}
+BACKENDS = {backend.kind: backend for backend in (ProcessBackend(), AttachedBackend())}
 DEFAULT = BACKENDS[roster.SPAWNED]
 
 

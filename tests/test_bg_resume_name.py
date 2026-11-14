@@ -34,7 +34,7 @@ class KeepNameTest(unittest.TestCase):
         path = Path(f"/x/{FULL}.jsonl") if found else None
         launch = ([f"/rename {name}"], "做事") if name else (["做事"], "")
         with mock.patch("cca.session.transcript.find_transcript", return_value=path), \
-             mock.patch("cca.session.takeover.resume_launch", return_value=launch):
+             mock.patch("cca.session.attach.resume_launch", return_value=launch):
             return cli._keep_name_on_bg_resume("b009", args)  # noqa: SLF001
 
     def test_named_bg_resume_swaps_prompt_for_rename(self):
@@ -54,14 +54,14 @@ class KeepNameTest(unittest.TestCase):
 class DeliverTest(unittest.TestCase):
     def test_delivers_after_successful_start(self):
         with mock.patch.object(cli.subprocess, "run", return_value=mock.Mock(returncode=0)), \
-             mock.patch("cca.session.takeover.deliver_after_resume", return_value="") as deliver:
+             mock.patch("cca.session.attach.deliver_after_resume", return_value="") as deliver:
             rc = cli._bg_resume_then_deliver("b009", "claude", ["--bg"], {}, (FULL, "做事"))  # noqa: SLF001
         self.assertEqual(rc, 0)
         deliver.assert_called_once_with("b009", FULL, "做事")
 
     def test_failed_start_does_not_deliver(self):
         with mock.patch.object(cli.subprocess, "run", return_value=mock.Mock(returncode=3)), \
-             mock.patch("cca.session.takeover.deliver_after_resume") as deliver:
+             mock.patch("cca.session.attach.deliver_after_resume") as deliver:
             self.assertEqual(cli._bg_resume_then_deliver("b009", "claude", [], {}, (FULL, "x")), 3)  # noqa: SLF001
         deliver.assert_not_called()
 

@@ -13,11 +13,11 @@
 const POINTER = '❯'       // ❯
 const CIRCLE = '◯'        // ◯ 派出的
 const CIRCLE_VIEWED = '●' // ●（Linux 上 Claude Code 用这个，macOS 是 ⏺）
-const DIAMOND = '◇'       // ◇ 接管的
-const DIAMOND_VIEWED = '◆' // ◆ 接管的、正在看
+const DIAMOND = '◇'       // ◇ 挂上的
+const DIAMOND_VIEWED = '◆' // ◆ 挂上的、正在看
 const DOT = ' · '
 
-// 派出的 ◯ / ●（正在看），接管的 ◇ / ◆
+// 派出的 ◯ / ●（正在看），挂上的 ◇ / ◆
 function markOf(row) {
   if (row.attached) return row.viewed ? DIAMOND_VIEWED : DIAMOND
   return row.viewed ? CIRCLE_VIEWED : CIRCLE
@@ -45,7 +45,7 @@ function line(surface, p, row, lit) {
             color: row.circleColor || undefined,
             dimColor: !row.circleColor && dim,
             ...bold,
-            // 派出的 ◯ / ●（正在看），接管的 ◇ / ◆
+            // 派出的 ◯ / ●（正在看），挂上的 ◇ / ◆
             children: [markOf(row) + ' '],
           }),
         ],

@@ -539,7 +539,7 @@ def all_states_index() -> dict:
 def live_index() -> dict:
     """短会话 id → [(profile, state), …]：同一 id 可能同时挂在多个号上（副本），全部保留。"""
     names = discover_profiles()
-    # 每个号要起一次 `claude agents --json`，挨个跑十几个号要两三秒；并行跑（同 takeover.candidates）
+    # 每个号要起一次 `claude agents --json`，挨个跑十几个号要两三秒；并行跑（同 attach.candidates）
     with ThreadPoolExecutor(max_workers=max(1, min(len(names), LIVE_INDEX_WORKERS))) as pool:
         results = list(pool.map(active_workers, names))
     index = {}
@@ -696,8 +696,8 @@ def _transcript_tail(path: Path | None, limit: int) -> list:
 def last_assistant_text(path: Path | None) -> str:
     """对话记录里它最后说的一句话（挑选框给人认会话用）。
 
-    逻辑与 takeover.last_line 一致；这里按 transcript 路径读，因为 handoff 看的是
-    源号的目录，而 takeover 只读当前号的 projects 池。
+    逻辑与 attach.last_line 一致；这里按 transcript 路径读，因为 handoff 看的是
+    源号的目录，而 attach 只读当前号的 projects 池。
     """
     for raw in reversed(_transcript_tail(path, TRANSCRIPT_TAIL_BYTES)):
         if '"assistant"' not in raw:
@@ -717,7 +717,7 @@ def last_assistant_text(path: Path | None) -> str:
 def latest_recap(path: Path | None) -> str:
     """Claude Code 自己写的回顾（transcript 里的 `away_summary`）；没有就返回空。
 
-    逻辑与 takeover.recap 一致，只是按路径读源号的 transcript。
+    逻辑与 attach.recap 一致，只是按路径读源号的 transcript。
     """
     for raw in reversed(_transcript_tail(path, TRANSCRIPT_TAIL_BYTES * 5)):
         if '"away_summary"' not in raw:
@@ -898,7 +898,7 @@ def handoff_candidates(source: str, *, current: str = "", include_interactive: b
     if wanted:
         for item in items:
             item["current"] = item["full"] == wanted or item["id"] == wanted[:8]
-    # 按最后一次活动倒序，和接管挑选框一致：刚用过的最上面；没有活动时间的排最后
+    # 按最后一次活动倒序，和挂上挑选框一致：刚用过的最上面；没有活动时间的排最后
     items.sort(key=lambda x: x.get("active_at") or "", reverse=True)
     return items
 
@@ -1085,7 +1085,9 @@ def push_session_once(profile: str, sid: str, prompt: str, cwd: str, **hooks) ->
     before = wait_last_conversation_stamp(profile, sid)
     workdir = cwd if cwd and Path(cwd).is_dir() else None
     # 有原名：启动提示换成 /rename（CC 否则按提示词自动起名覆盖原名），prompt 续上后以消息送到
-    from cca.session.takeover import resume_launch  # noqa: PLC0415 - takeover 顶部不导入本模块，延迟避免循环
+    from cca.session.attach import (
+        resume_launch,  # noqa: PLC0415 - attach 顶部不导入本模块，延迟避免循环
+    )
     path = session_transcript(profile_dir(profile), sid)
     full = path.stem if path is not None else sid
     launch, pending = resume_launch(profile, full, prompt, path=path)
@@ -1107,7 +1109,7 @@ def push_session_once(profile: str, sid: str, prompt: str, cwd: str, **hooks) ->
         return _push_failure(result, text, lowered)
     error = ""
     if pending:
-        from cca.session.takeover import deliver_after_resume  # noqa: PLC0415
+        from cca.session.attach import deliver_after_resume  # noqa: PLC0415
 
         # 基线保持推之前取的那个：/rename 写的是 system 记录，WAIT_BOOKKEEPING_TYPES 已经滤掉，
         # 不会被当成"动了"；投递之后再取基线会把投递那句话触发的一轮（含撞额度）吞进基线。
@@ -1125,7 +1127,7 @@ def stop_sessions(name: str, *, force: bool = False, exclude_ids=()) -> tuple:
     对话都保留（`cca <profile> attach <id>` 可回来）。`force=True` 才连在跑的一起停。
 
     只对真正的后台任务动手（`is_job`）：交互会话停不掉，硬停只会得到 `No job matching`；
-    `exclude_ids` 里的会话（已被接管的）也不动。
+    `exclude_ids` 里的会话（已被挂上的）也不动。
     """
     sessions = active_workers(name)
     targets, skipped, not_jobs = [], [], []
@@ -1319,7 +1321,11 @@ def cmd_resume_bg(args: list) -> int:
     if flags.get("--dry-run"):
         say(f"共 {len(items)} 条（--dry-run：没动手）")
         return 0
-    from cca.session.takeover import deliver_after_resume, registry_entry, resume_quietly  # noqa: PLC0415
+    from cca.session.attach import (  # noqa: PLC0415
+        deliver_after_resume,
+        registry_entry,
+        resume_quietly,
+    )
 
     failed = 0
     for full, e in items:

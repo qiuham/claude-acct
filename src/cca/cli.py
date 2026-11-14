@@ -105,7 +105,7 @@ HELP_SECTIONS = (
     ("sideagent（另一个号上的会话帮你干活；派活在对话里用 sideagent_* 工具）", (
         ("cca mcp install --all", "注册 MCP 工具（新建的号会自动注册）"),
         ("cca plugin install --all", "装面板插件"),
-        ("cca sideagent hook install --all", "接管会话的「请确认」转到面板上点"),
+        ("cca sideagent hook install --all", "挂上会话的「请确认」转到面板上点"),
     )),
     ("设置与维护", (
         ("cca set proxy <号>|--global <url|none>", "代理，单号优先；其余设置见 cca set --help"),
@@ -195,7 +195,7 @@ def _keep_name_on_bg_resume(name: str, claude_args: list) -> tuple[list, tuple]:
     直接把提示当启动提示，CC 会按提示给会话另起名字、盖掉原名（11-14 closed-loop-engine 被别的会话
     这样叫醒，变成 golden-block-digest-runfields）。返回 (改好的参数, (完整编号, 待投的话))；不用改返回原参数和空元组。
     """
-    from cca.session.takeover import resume_launch  # noqa: PLC0415
+    from cca.session.attach import resume_launch  # noqa: PLC0415
     from cca.session.transcript import find_transcript, resume_id  # noqa: PLC0415
 
     session = resume_id(claude_args)
@@ -216,7 +216,7 @@ def _keep_name_on_bg_resume(name: str, claude_args: list) -> tuple[list, tuple]:
 
 def _bg_resume_then_deliver(name: str, exe: str, claude_args: list, env: dict, pending: tuple) -> int:
     """后台续跑：先起（启动提示是 /rename），登记好以后把原提示作为消息送进去。"""
-    from cca.session.takeover import deliver_after_resume  # noqa: PLC0415
+    from cca.session.attach import deliver_after_resume  # noqa: PLC0415
 
     r = subprocess.run([exe, *claude_args], env=env, check=False)  # noqa: S603 - exe 来自 shutil.which
     if r.returncode != 0:
@@ -304,7 +304,10 @@ def main(argv=None) -> int:
         cmd_sessions,
         cmd_status,
     )
-    from cca.session.push import cmd_resume_bg, cmd_stop_bg  # noqa: PLC0415 - push 顶部导入本模块，延迟破环
+    from cca.session.push import (  # noqa: PLC0415 - push 顶部导入本模块，延迟破环
+        cmd_resume_bg,
+        cmd_stop_bg,
+    )
     from cca.session.quota_hint import cmd_quota_hint  # noqa: PLC0415 - 用到才导入
     from cca.session.sideagent import cmd_sideagent  # noqa: PLC0415 - 只在用 sideagent 时才需要
     from cca.session.trim import cmd_trim  # noqa: PLC0415 - trim 顶部导入本模块，延迟破环

@@ -1,4 +1,4 @@
-"""接管会话的确认转发钩子：临时目录，不跑真 claude。"""
+"""挂上会话的确认转发钩子：临时目录，不跑真 claude。"""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ class HookTest(unittest.TestCase):
         self.root = root
 
     def _take_over(self, owner="master-1"):
-        # 格式改了：接管记录在 sideagents/<名字>/state.json（kind=attached），主人记在 sessions/<主人>.json
+        # 格式改了：挂上记录在 sideagents/<名字>/state.json（kind=attached），主人记在 sessions/<主人>.json
         write_state(NAME, kind="attached", session_id=SESSION)
         write_roster(owner, {NAME: "attached"})
 
@@ -71,7 +71,7 @@ class HookTest(unittest.TestCase):
         return {}
 
     def test_not_taken_over_stays_silent(self):
-        # 没被接管：不表态，Claude Code 照常弹原生确认框
+        # 没被挂上：不表态，Claude Code 照常弹原生确认框
         self.assertEqual(permission.hook(HOOK_INPUT, wait_seconds=1), "")
 
     def test_bad_input_stays_silent(self):
@@ -127,7 +127,7 @@ class HookTest(unittest.TestCase):
 
 
     def test_two_owners_one_releases_still_taken(self):
-        # M 对 N：两个主会话都接管了它，一个放手，请求照样转到面板（另一个还在）
+        # M 对 N：两个主会话都挂上了它，一个放手，请求照样转到面板（另一个还在）
         self._take_over("master-1")
         write_roster("master-2", {NAME: "attached"})
         self.assertEqual(permission._taken_over_name(SESSION), NAME)  # noqa: SLF001
@@ -167,13 +167,13 @@ class CliAndSyncTest(HookTest):
             sideagent_cli._hook_command(["install"])  # noqa: SLF001
 
     def test_sync_exposes_first_pending(self):
-        from cca.session import takeover  # noqa: PLC0415
+        from cca.session import attach  # noqa: PLC0415
 
         self._take_over()
-        self.assertIsNone(takeover._first_pending(NAME))  # noqa: SLF001
+        self.assertIsNone(attach._first_pending(NAME))  # noqa: SLF001
         thread, _out = self._run_hook()
         self._wait_request()
-        shown = takeover._first_pending(NAME)  # noqa: SLF001
+        shown = attach._first_pending(NAME)  # noqa: SLF001
         self.assertEqual((shown["tool"], shown["count"]), ("Bash", 1))
         permission.answer(NAME, "deny")
         thread.join(5)

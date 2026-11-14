@@ -373,7 +373,7 @@ class OwnerTest(unittest.TestCase):
         stopped = []
         with mock.patch.object(sideagent, "_stop", side_effect=lambda args: stopped.append(args[0])):
             sideagent.stop_owned("会话-1")
-        # 接管的不停（只当作解开），已经停了的不再停一遍
+        # 挂上的不停（只当作解开），已经停了的不再停一遍
         self.assertEqual(stopped, ["ds#a"])
 
     def test_roster_entry_round_trip(self):

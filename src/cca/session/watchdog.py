@@ -45,8 +45,8 @@ from cca.account.store import profile_kind
 from cca.api.usage import live_usage, usage_snapshot
 from cca.errors import die, say
 from cca.paths import accounts_root, profile_dir
+from cca.session.attach import process_config_dir
 from cca.session.push import session_name, session_transcript, shares_sessions
-from cca.session.takeover import process_config_dir
 
 FULL = 100                       # 窗口用量到这个数就算用满
 ROUND_SECONDS = 30               # 一整轮（读额度、决策、叫醒）的间隔
@@ -1026,7 +1026,7 @@ class Loop:
 
     # -- 两秒一次，只复查「这一轮结束就搬」的那几条
     def poll_armed(self) -> None:
-        from cca.session.takeover import registry_entry  # noqa: PLC0415
+        from cca.session.attach import registry_entry  # noqa: PLC0415
 
         now = time.time()
         for session, entry in list(self.armed.items()):

@@ -21,7 +21,7 @@ import isolate  # noqa: F401 - 先于 cca 导入：HOME 指到临时目录，测
 
 from cca import report
 from cca.config import AGENTS_TIMEOUT
-from cca.session import agents_view, takeover
+from cca.session import agents_view, attach
 
 NOW = 1_800_000_000.0
 DAY = 86400
@@ -60,8 +60,8 @@ class ViewCase(unittest.TestCase):
             os.utime(path, (mtime, mtime))
 
     def build(self, rows, *, failed=(), show_all=False):
-        with mock.patch.object(takeover, "candidates_checked", return_value=(rows, list(failed))), \
-                mock.patch.object(takeover, "PROJECTS_DIR", self.projects):
+        with mock.patch.object(attach, "candidates_checked", return_value=(rows, list(failed))), \
+                mock.patch.object(attach, "PROJECTS_DIR", self.projects):
             return agents_view.build(show_all=show_all, now=NOW)
 
 
@@ -200,33 +200,33 @@ class FailedAccountTest(unittest.TestCase):
                 return None
             return [{"id": "aaaa1111", "sessionId": "aaaa1111-x", "state": "working", "pid": 5,
                      "startedAt": int(time.time() * 1000)}]
-        with mock.patch.object(takeover, "agents_or_none", side_effect=fake):
-            rows, failed = takeover.candidates_checked(["ok", "bad"], timeout=7)
+        with mock.patch.object(attach, "agents_or_none", side_effect=fake):
+            rows, failed = attach.candidates_checked(["ok", "bad"], timeout=7)
         self.assertEqual(failed, ["bad"])
         self.assertEqual([r["account"] for r in rows], ["ok"])
 
     def test_agents_view_uses_agents_timeout(self):
-        with mock.patch.object(takeover, "candidates_checked", return_value=([], [])) as fetch:
+        with mock.patch.object(attach, "candidates_checked", return_value=([], [])) as fetch:
             agents_view.build(now=NOW)
         self.assertEqual(fetch.call_args.kwargs["timeout"], AGENTS_TIMEOUT)
 
     def test_timeout_is_passed_to_subprocess(self):
         done = mock.Mock(returncode=0, stdout="[]")
-        with mock.patch.object(takeover, "_claude", return_value="claude"), \
-                mock.patch.object(takeover.subprocess, "run", return_value=done) as run:
-            takeover.agents_or_none("001", timeout=3)
-            takeover.agents_or_none("001")
-        self.assertEqual([c.kwargs["timeout"] for c in run.call_args_list], [3, takeover.AGENTS_LIST_TIMEOUT])
+        with mock.patch.object(attach, "_claude", return_value="claude"), \
+                mock.patch.object(attach.subprocess, "run", return_value=done) as run:
+            attach.agents_or_none("001", timeout=3)
+            attach.agents_or_none("001")
+        self.assertEqual([c.kwargs["timeout"] for c in run.call_args_list], [3, attach.AGENTS_LIST_TIMEOUT])
 
     def test_hung_account_times_out_to_none(self):
-        with mock.patch.object(takeover, "_claude", return_value="claude"), \
-                mock.patch.object(takeover.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 1)):
-            self.assertIsNone(takeover.agents_or_none("slow", timeout=1))
+        with mock.patch.object(attach, "_claude", return_value="claude"), \
+                mock.patch.object(attach.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 1)):
+            self.assertIsNone(attach.agents_or_none("slow", timeout=1))
 
     def test_run_failure_returns_none(self):
-        with mock.patch.object(takeover, "_claude", return_value="claude"), \
-                mock.patch.object(takeover.subprocess, "run", side_effect=OSError("x")):
-            self.assertIsNone(takeover.agents_or_none("001"))
+        with mock.patch.object(attach, "_claude", return_value="claude"), \
+                mock.patch.object(attach.subprocess, "run", side_effect=OSError("x")):
+            self.assertIsNone(attach.agents_or_none("001"))
 
 
 if __name__ == "__main__":

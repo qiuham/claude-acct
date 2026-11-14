@@ -1,6 +1,6 @@
 """cca agents 的数据层：各号的 `claude agents` 合并成一张跨号总表（只读，不碰会话）。
 
-取数、同一会话的合并都复用 takeover（candidates_checked / one_per_session / last_line / last_ask），
+取数、同一会话的合并都复用 attach（candidates_checked / one_per_session / last_line / last_ask），
 这里只加三件事：判断活没活着、排序与默认范围、给每行补「在干什么」和「多久前」。
 """
 
@@ -11,7 +11,7 @@ import time
 from contextlib import suppress
 
 from cca.config import AGENTS_RECENT_DAYS, AGENTS_TIMEOUT
-from cca.session import takeover
+from cca.session import attach
 from cca.session.watchdog import hits_limit, last_assistant_in
 
 DEAD_STATES = ("stopped", "failed", "ended")
@@ -28,7 +28,7 @@ def is_alive(row: dict) -> bool:
     if state in DEAD_STATES:
         return False
     # 没有 pid 的 blocked / waiting / idle 是早就没进程的旧登记（如 4 天前的 Login expired），不算活着
-    return bool(row.get("pid")) or state in takeover.RUNNING_STATES
+    return bool(row.get("pid")) or state in attach.RUNNING_STATES
 
 
 def merge(rows: list) -> list:
@@ -44,7 +44,7 @@ def merge(rows: list) -> list:
     out = []
     for group in groups.values():
         alive = [one for one in group if is_alive(one)]
-        chosen = takeover.one_per_session(alive)[0] if alive else group[0]   # 活着的里挑最像在用的那条
+        chosen = attach.one_per_session(alive)[0] if alive else group[0]   # 活着的里挑最像在用的那条
         others = sorted({one["account"] for one in group if one["account"] != chosen["account"]})
         out.append({**chosen, "alive": bool(alive), "also_on": others})
     return out
@@ -81,7 +81,7 @@ def _moved_from(row: dict, moves: dict) -> str:
 
 def _active_at(row: dict) -> float:
     """最后活动：对话记录的修改时间；找不到就用登记的起始时间。"""
-    path = takeover.transcript(row["session_id"]) if row.get("session_id") else None
+    path = attach.transcript(row["session_id"]) if row.get("session_id") else None
     if path is not None:
         with suppress(OSError):
             return path.stat().st_mtime
@@ -91,7 +91,7 @@ def _active_at(row: dict) -> float:
 def _priority(row: dict) -> int:
     if row["state"] in ATTENTION_STATES:
         return 0
-    if row["state"] in takeover.RUNNING_STATES:
+    if row["state"] in attach.RUNNING_STATES:
         return 1
     return 2
 
@@ -102,13 +102,13 @@ def _doing(row: dict) -> str:
     if text and text not in STATE_WORDS:
         return " ".join(text.split())
     sid = row.get("session_id") or ""
-    return takeover.last_line(sid) or takeover.last_ask(sid)
+    return attach.last_line(sid) or attach.last_ask(sid)
 
 
 def build(*, show_all: bool = False, now: float | None = None, accounts: list | None = None) -> dict:
     """总表：{"rows": [...], "failed": [取不到的号], "hidden": 默认范围外被略去的条数}。"""
     now = time.time() if now is None else now
-    rows, failed = takeover.candidates_checked(accounts, timeout=AGENTS_TIMEOUT)
+    rows, failed = attach.candidates_checked(accounts, timeout=AGENTS_TIMEOUT)
     merged = merge(rows)
     moves = recent_moves(now)
     for row in merged:
@@ -118,8 +118,8 @@ def build(*, show_all: bool = False, now: float | None = None, accounts: list | 
     shown = [row for row in merged if show_all or row["alive"] or row["active_at"] >= cutoff]
     for row in shown:
         # 撞额度：活着但停在额度错误上，要人换号，算「要处理」
-        if row["alive"] and row["state"] not in takeover.RUNNING_STATES and row["session_id"]:
-            path = takeover.transcript(row["session_id"])
+        if row["alive"] and row["state"] not in attach.RUNNING_STATES and row["session_id"]:
+            path = attach.transcript(row["session_id"])
             if hits_limit(last_assistant_in(path)):
                 row["state"] = "quota"
         row["title"] = row["name"] or row["id"]

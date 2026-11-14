@@ -42,12 +42,12 @@ def _bg_sync_command(args: list) -> int:
     return 0
 
 
-def _takeover_candidates_command(args: list) -> int:
-    # 面板接管挑选框用：本机各号能接管的会话（JSON）；--all 连在跑的一起列
-    from cca.session import takeover  # noqa: PLC0415
+def _attach_candidates_command(args: list) -> int:
+    # 面板挂上挑选框用：本机各号能挂上的会话（JSON）；--all 连在跑的一起列
+    from cca.session import attach  # noqa: PLC0415
 
     owner = str(core.caller_now().get("sessionId") or "")
-    print(json.dumps(takeover.picker_rows(include_running="--all" in args, owner_session=owner),  # noqa: T201
+    print(json.dumps(attach.picker_rows(include_running="--all" in args, owner_session=owner),  # noqa: T201
                      ensure_ascii=False))
     return 0
 
@@ -59,15 +59,15 @@ def _latest_command(args: list) -> int:
     return 0
 
 
-def _release_command(args: list) -> int:
-    """面板的“拿掉”按钮：把一个接管的会话从这个主会话的名单里拿掉，会话本身不停。"""
-    from cca.session import takeover  # noqa: PLC0415 - 只有这个命令用
+def _detach_command(args: list) -> int:
+    """面板的“拿掉”按钮：把一个挂上的会话从这个主会话的名单里拿掉，会话本身不停。"""
+    from cca.session import attach  # noqa: PLC0415 - 只有这个命令用
 
     name, owner = ([item.strip() for item in args] + ["", ""])[:2]
     if not name or not owner:
-        die("用法：cca sideagent release <名字> <主会话编号>")
-    if takeover.release(name, owner) < 0:
-        die(f"{name} 不是接管的会话")
+        die("用法：cca sideagent detach <名字> <主会话编号>")
+    if attach.detach(name, owner) < 0:
+        die(f"{name} 不是挂上的会话")
     return 0
 
 
@@ -208,7 +208,7 @@ def _interrupt_command(args: list) -> int:
 def stop_owned(session_id: str) -> int:
     """停掉某个会话派出去的所有sideagent（会话结束、或在面板里收工时用）。
 
-    只看这个会话自己的名单（一串编号合起来）；接管的不停（只当作解开，规则 6），会话照跑。
+    只看这个会话自己的名单（一串编号合起来）；挂上的不停（只当作解开，规则 6），会话照跑。
     """
     from cca.session import backends, roster  # noqa: PLC0415 - backends 导入本模块，延迟破环
 
@@ -297,9 +297,9 @@ def _split(args: list) -> tuple:
     return name, rest, flags
 
 
-def _takeover_command(args: list) -> int:
-    """面板挑选框按回车后调：接管一个会话，挂到发起命令的主会话上；结果打印成 JSON。"""
-    from cca.session import takeover  # noqa: PLC0415
+def _attach_command(args: list) -> int:
+    """面板挑选框按回车后调：挂上一个会话，挂到发起命令的主会话上；结果打印成 JSON。"""
+    from cca.session import attach  # noqa: PLC0415
 
     key = next((item for item in args if not item.startswith("--")), "")
     account = next((item.split("=", 1)[1] for item in args if item.startswith("--account=")), "")
@@ -311,13 +311,13 @@ def _takeover_command(args: list) -> int:
     elif not owner.get("session"):
         result = {"error": "找不到发起命令的主会话，接不上"}
     else:
-        result = takeover.takeover(key, owner, account=account)
+        result = attach.attach(key, owner, account=account)
     print(json.dumps(result, ensure_ascii=False))  # noqa: T201
     return 1 if result.get("error") else 0
 
 
 def _permission_hook_command(_args: list) -> int:
-    # 各号 settings.json 里的 PermissionRequest 钩子调它；没被接管的会话立刻无输出退出
+    # 各号 settings.json 里的 PermissionRequest 钩子调它；没被挂上的会话立刻无输出退出
     from cca.session import permission  # noqa: PLC0415
 
     return permission.hook_main()
@@ -420,9 +420,9 @@ SUBCOMMANDS = {
     "tell": _tell_command,
     "version": _version_command,
     "bg-sync": _bg_sync_command,
-    "takeover-candidates": _takeover_candidates_command,
-    "takeover": _takeover_command,
+    "attach-candidates": _attach_candidates_command,
+    "attach": _attach_command,
     "latest": _latest_command,
     "stop-owned": _stop_owned_command,
-    "release": _release_command,
+    "detach": _detach_command,
 }

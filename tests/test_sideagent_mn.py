@@ -1,4 +1,4 @@
-"""sideagent 目录和 M 对 N 接管（docs/specs/sideagent-mn.md 第六节要的测试）。
+"""sideagent 目录和 M 对 N 挂上（docs/specs/sideagent-mn.md 第六节要的测试）。
 
 全在临时目录里：SIDEAGENT_DIR 换成 <临时>/sideagents，名单在 <临时>/sessions，不碰真实的 ~/.cca。
 """
@@ -26,7 +26,7 @@ import isolate  # noqa: E402,F401 - 先于 cca 导入：HOME 指到临时目录�
 
 from cca import mcp_sideagent  # noqa: E402
 from cca.config import SIDEAGENT_KEEP_DAYS  # noqa: E402
-from cca.session import backends, roster, sideagent, takeover  # noqa: E402
+from cca.session import attach, backends, roster, sideagent  # noqa: E402
 
 DAY = 86400
 SESSION = "6b6dd1ed-90aa-433f-b4ce-95584e83d015"
@@ -38,8 +38,8 @@ def _owner(session: str, pid: int) -> dict:
             "instance_socket": f"/tmp/{pid}.sock"}  # noqa: S108
 
 
-class TakeoverMNTest(unittest.TestCase):
-    """两个主会话接管同一个原生会话。"""
+class AttachMNTest(unittest.TestCase):
+    """两个主会话挂上同一个原生会话。"""
 
     def setUp(self):
         self.root = use_temp_root(self)
@@ -49,25 +49,25 @@ class TakeoverMNTest(unittest.TestCase):
         row = {"account": "003", "id": "6b6dd1ed", "session_id": SESSION, "name": "exp-a",
                "kind": "background", "cwd": "/w", "state": "idle", "running": True}
         self.alive = {"主会话-A", "主会话-B"}
-        for patcher in (mock.patch.object(takeover, "candidates", return_value=[row]),
-                        mock.patch.object(takeover, "registry_entry",
+        for patcher in (mock.patch.object(attach, "candidates", return_value=[row]),
+                        mock.patch.object(attach, "registry_entry",
                                           return_value={"sessionId": SESSION, "status": "idle", "jobId": ""}),
-                        mock.patch.object(takeover, "transcript", return_value=self.transcript),
-                        mock.patch.object(takeover, "card", return_value="卡片"),
+                        mock.patch.object(attach, "transcript", return_value=self.transcript),
+                        mock.patch.object(attach, "card", return_value="卡片"),
                         mock.patch.object(roster, "owner_alive",
                                           side_effect=lambda data: data.get("session") in self.alive)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
     def test_two_owners_take_over_the_same_one(self):
-        first = takeover.takeover(SESSION, _owner("主会话-A", 11))
+        first = attach.attach(SESSION, _owner("主会话-A", 11))
         self.assertEqual(first["name"], NAME)
         state = sideagent._read_state(NAME)  # noqa: SLF001
         self.assertEqual(state["kind"], "attached")
         self.assertNotIn("owner_session", state)          # 谁用着它不记在 state.json
         taken_at = state["taken_over_at"]
         events_before = sideagent._events_path(NAME).read_text(encoding="utf-8")  # noqa: SLF001
-        second = takeover.takeover(SESSION, _owner("主会话-B", 22))
+        second = attach.attach(SESSION, _owner("主会话-B", 22))
         self.assertEqual(second["name"], NAME)
         # 第二个主人：不重建、不覆盖（同一个文件夹、同一份同步），只在自己的名单里加一条
         self.assertEqual(sideagent._read_state(NAME)["taken_over_at"], taken_at)  # noqa: SLF001
@@ -81,48 +81,48 @@ class TakeoverMNTest(unittest.TestCase):
         self.assertEqual((top["pid"], top["proc_start"], top["instance_socket"]), (22, "p22", "/tmp/22.sock"))  # noqa: S108
 
     def test_one_releases_the_other_keeps_it(self):
-        takeover.takeover(SESSION, _owner("主会话-A", 11))
-        takeover.takeover(SESSION, _owner("主会话-B", 22))
-        self.assertEqual(takeover.release(NAME, "主会话-A"), 1)
+        attach.attach(SESSION, _owner("主会话-A", 11))
+        attach.attach(SESSION, _owner("主会话-B", 22))
+        self.assertEqual(attach.detach(NAME, "主会话-A"), 1)
         self.assertNotIn(NAME, roster.read("主会话-A")["agents"])
         self.assertIn(NAME, roster.read("主会话-B")["agents"])
         self.assertFalse(sideagent._read_state(NAME).get("finished_at"))  # noqa: SLF001
         # 还挂着它的那个主会话照样同步它
-        with mock.patch.object(backends.TakenOverBackend, "sync",
+        with mock.patch.object(backends.AttachedBackend, "sync",
                                lambda _self, name, **_kw: {"name": name}) as _sync:
             self.assertEqual(backends.sync_owned("主会话-B"), 1)
             self.assertEqual(backends.sync_owned("主会话-A"), 0)
         # 最后一个也放手：删 run/、写 finished_at，文件夹留着
-        self.assertEqual(takeover.release(NAME, "主会话-B"), 0)
+        self.assertEqual(attach.detach(NAME, "主会话-B"), 0)
         self.assertGreater(sideagent._read_state(NAME)["finished_at"], 0)  # noqa: SLF001
         self.assertTrue(sideagent._events_path(NAME).exists())  # noqa: SLF001
-        # 停了以后又有人接管：接着用原来的文件夹，去掉 finished_at
-        takeover.takeover(SESSION, _owner("主会话-A", 11))
+        # 停了以后又有人挂上：接着用原来的文件夹，去掉 finished_at
+        attach.attach(SESSION, _owner("主会话-A", 11))
         self.assertNotIn("finished_at", sideagent._read_state(NAME))  # noqa: SLF001
 
-    def test_release_tool_only_removes_my_entry(self):
-        takeover.takeover(SESSION, _owner("主会话-A", 11))
-        takeover.takeover(SESSION, _owner("主会话-B", 22))
+    def test_detach_tool_only_removes_my_entry(self):
+        attach.attach(SESSION, _owner("主会话-A", 11))
+        attach.attach(SESSION, _owner("主会话-B", 22))
         me = {"pid": 11, "procStart": "p11", "sessionId": "主会话-A"}
         with mock.patch.object(sideagent, "caller_now", return_value=me):
-            text = mcp_sideagent._tool_release({"name": NAME})  # noqa: SLF001
-        self.assertIn("还有 1 个会话接管着它", text)
+            text = mcp_sideagent._tool_detach({"name": NAME})  # noqa: SLF001
+        self.assertIn("还有 1 个会话挂上着它", text)
         with mock.patch.object(sideagent, "caller_now", return_value=me):
-            self.assertIn("不是本会话接管的", mcp_sideagent._tool_release({"name": NAME}))  # noqa: SLF001
+            self.assertIn("不是本会话挂上的", mcp_sideagent._tool_detach({"name": NAME}))  # noqa: SLF001
 
     def test_cannot_take_over_someone_elses_spawned_sideagent(self):
-        # 目标会话其实是 主会话-A 派出的 sideagent（它自己的 claude 会话）：只有一个主人，不能接管
+        # 目标会话其实是 主会话-A 派出的 sideagent（它自己的 claude 会话）：只有一个主人，不能挂上
         write_state("ds#a1b2c3", kind="spawned", session_id=SESSION)
         write_roster("主会话-A", {"ds#a1b2c3": "spawned"})
-        with mock.patch.object(takeover, "session_name", return_value=""):
-            result = takeover.takeover(SESSION, _owner("主会话-B", 22))
-        self.assertEqual(result["error"], "这是 主会话-A 派出的 sideagent，不能接管")
+        with mock.patch.object(attach, "session_name", return_value=""):
+            result = attach.attach(SESSION, _owner("主会话-B", 22))
+        self.assertEqual(result["error"], "这是 主会话-A 派出的 sideagent，不能挂上")
         self.assertFalse(sideagent._state_path(NAME).exists())  # noqa: SLF001
         self.assertEqual(roster.read("主会话-B"), {})
 
 
 class DeadOwnerTest(unittest.TestCase):
-    """主人死了的名单不算；清理时接管的那条删掉（只当作解开），派出的留着。"""
+    """主人死了的名单不算；清理时挂上的那条删掉（只当作解开），派出的留着。"""
 
     def setUp(self):
         self.root = use_temp_root(self)
@@ -140,7 +140,7 @@ class DeadOwnerTest(unittest.TestCase):
 
     def test_cleanup_unties_attached_and_finishes_it(self):
         roster.cleanup(force=True)
-        # 没有活着的主人：接管的写 finished_at，死了的名单里那一条删掉；派出的条目留着（以后还能接着开）
+        # 没有活着的主人：挂上的写 finished_at，死了的名单里那一条删掉；派出的条目留着（以后还能接着开）
         self.assertGreater(sideagent._read_state(NAME)["finished_at"], 0)  # noqa: SLF001
         self.assertEqual(roster.read("死了的")["agents"], {"ds#a1": {"kind": "spawned", "since": 1.0}})
 
@@ -281,7 +281,7 @@ class MigrateTest(unittest.TestCase):
         self._flat("ds#a1.last.lock", "")
         self._flat("ds#a1.owner", {"session": "会话-1", "account": "005", "label": "查日志",
                                    "caller_agent": "a7", "instance_socket": "/x/a1.sock"})
-        # 接管的（老格式 kind=bg）
+        # 挂上的（老格式 kind=bg）
         self._flat(f"{NAME}.json", {"kind": "bg", "external": True, "session_id": SESSION,
                                     "owner_session": "会话-1", "owner_pid": 9, "owner_proc_start": "p9"})
         self._flat(f"{NAME}.events", "")

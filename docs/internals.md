@@ -9,7 +9,7 @@ README 讲怎么用；这里记机制和文件格式，给改代码、排查疑�
 `cca/session/backends.py` 定义后端接口（发话、状态、结果、停、打断、同步），两个实现：
 
 - **派出的**（spawned）：cca 起的常驻进程 `cca sideagent serve`（`sideagent_server.py`），claude 官方 stream-json 模式。
-- **接管的**（attached）：Claude Code 自己跑的原生会话（`takeover.py`），我们只读它的对话记录、往它的消息套接字发话。
+- **挂上的**（attached）：Claude Code 自己跑的原生会话（`attach.py`），我们只读它的对话记录、往它的消息套接字发话。
 
 MCP 工具、命令行、主会话收工都只问 `backend_for(名字)`。面板也不看种类，只看两个通用字段：
 `external`（进程不归我们管、进度靠同步）和 `status=waiting`（等确认）。
@@ -30,7 +30,7 @@ MCP 工具、命令行、主会话收工都只问 `backend_for(名字)`。面板
 停了删 `run/`、`state.json` 写 `finished_at`，整个文件夹留 30 天（`SIDEAGENT_KEEP_DAYS`）再清。
 
 哪个主会话用着哪些 sideagent 记在 `~/.cca/sessions/<主会话编号>.json`（只有那个会话自己写）。
-派出的只有一个主人；接管的可以同时挂在好几个主会话上（M 对 N），放手只解开自己那条。
+派出的只有一个主人；挂上的可以同时挂在好几个主会话上（M 对 N），放手只解开自己那条。
 面板先读本会话的名单，再读各个文件夹画横条。设计见 `docs/specs/sideagent-mn.md`。
 
 ### 归属：回报送给谁
@@ -79,15 +79,15 @@ claude 会马上另开一轮跑它，跑完之前排队的下一条不发。
 
 ### 按会话发话（`sideagent_send {session}`）
 
-`takeover.message()`：`_locate()` 用各号 `claude agents --json --all` 找这条会话的全部登记，按
+`attach.message()`：`_locate()` 用各号 `claude agents --json --all` 找这条会话的全部登记，按
 「在跑 > 没停的（`startedAt` 越新越前）> stopped / failed」排；有登记表条目且有 `messagingSocketPath`
 就直接 `deliver()`；否则 `_wake_target()` 按顺序挑第一个能用的号（`usable` 回调看额度 / 登录 / key），
 都不行退回发话人自己的号（按普通会话起，`--permission-mode bypassPermissions`），`_wake()` 起来后等套接字再投。
 不写 `~/.cca/sessions` 名单，不建 `sideagents/<名字>/`。
 
-### 接管的同步
+### 挂上的同步
 
-本会话的 MCP 服务（`cca mcp serve`）起一条后台线程，每 2 秒按位置增量读接管会话的对话记录
+本会话的 MCP 服务（`cca mcp serve`）起一条后台线程，每 2 秒按位置增量读挂上会话的对话记录
 （`~/.claude/projects/<目录>/<会话编号>.jsonl`），翻成面板事件；状态取原号登记表 `<配置目录>/sessions/*.json`：
 busy = 运行中，waiting = 等确认（标黄，写出卡在哪个工具调用），idle = 空闲，不在登记表 = 结束。每做完一轮叫醒主会话一次。
 同步线程写心跳 `~/.cca/sideagents/.sync-<会话>.beat`，面板看它 10 秒内写过就只读文件；MCP 服务不在时面板兜底起
@@ -127,7 +127,7 @@ busy = 运行中，waiting = 等确认（标黄，写出卡在哪个工具调用
 
 ## 启动环境（`env.session_env`）
 
-所有起会话的路径（启动、handoff、接管、wake、watchdog、按会话发话）都走 `session_env()`：
+所有起会话的路径（启动、handoff、挂上、wake、watchdog、按会话发话）都走 `session_env()`：
 
 - 代理注入；没配代理的订阅号拒绝启动。`cca doctor` 在没配代理时跳过出网检查，避免从本机出口暴露 IP。
 - 经代理查一次出口（ip-api）：不支持的地区拒绝；`TZ` 跟出口时区（`CCA_TZ` 可覆盖），探测失败用 `Asia/Singapore`。

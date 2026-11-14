@@ -276,7 +276,7 @@ class RequestSelfMoveTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "abcdef12-0000"}), \
              mock.patch.object(lifecycle, "require_profile"), \
              mock.patch("cca.session.push.shares_sessions", return_value=shares), \
-             mock.patch("cca.session.takeover.registry_entry", return_value=entry), \
+             mock.patch("cca.session.attach.registry_entry", return_value=entry), \
              mock.patch.object(lifecycle.subprocess, "Popen") as popen, \
              mock.patch("cca.session.watchdog.request_move") as request, \
              mock.patch.object(lifecycle, "say"):
@@ -326,7 +326,7 @@ class RequestStayTest(unittest.TestCase):
         entry = {"kind": "bg"} if entry is None else entry
         said = []
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "abcdef12-0000", "CLAUDE_CONFIG_DIR": "/x/b004"}), \
-             mock.patch("cca.session.takeover.registry_entry", return_value=entry), \
+             mock.patch("cca.session.attach.registry_entry", return_value=entry), \
              mock.patch("cca.session.watchdog.request_stay",
                         return_value={"five_hour": 1.0} if windows is None else windows) as request, \
              mock.patch.object(lifecycle, "say", said.append):
@@ -470,7 +470,7 @@ class CurrentWithoutTargetTest(unittest.TestCase):
         entry = {"kind": kind, "sessionId": "sid-full"}
         env = {"CLAUDE_CONFIG_DIR": "/x/b005"}
         with mock.patch.dict(os.environ, env), \
-             mock.patch("cca.session.takeover.registry_entry", return_value=entry), \
+             mock.patch("cca.session.attach.registry_entry", return_value=entry), \
              mock.patch("cca.session.watchdog.request_move") as move, \
              mock.patch.object(lifecycle, "require_profile"), \
              mock.patch("cca.session.push.shares_sessions", return_value=True), \

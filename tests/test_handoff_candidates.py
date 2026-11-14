@@ -70,7 +70,7 @@ class CandidatesTest(unittest.TestCase):
         self.assertTrue(by_id["cccc3333"]["running"])
 
     def test_sorted_by_last_activity_desc(self):
-        """按最后一次活动倒序（和接管挑选框一致），不是按名字、也不是在跑的最后。"""
+        """按最后一次活动倒序（和挂上挑选框一致），不是按名字、也不是在跑的最后。"""
         files = {}
         for short, age in (("old11111", 300), ("new11111", 10), ("mid11111", 120)):
             path = self.root / f"{short}.jsonl"

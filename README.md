@@ -149,7 +149,7 @@ cca handoff                             # 不带参数：先选源号、再选�
 
 - 选择框按最后活动倒序，**默认一条都不勾**；第一行一键全选「等输入 / 挂起的」（`blocked`），`a` 全选或全不选；确认前还会再问一次。非 tty 必须给 `--only` 或 `--all`。
 - 正在跑的标「不动（在跑）」，交互终端正开着的标「搬不了」。`stopped` 的会话默认不列，要搬就 `--only=<编号前缀>` 点名。
-- 续上的会话保留原名：cca 用 `/rename <原名>` 当启动提示（不用 `--name`，带它续会话会分叉出新编号；不改名则 Claude Code 会按提示词自动起名覆盖原名），原来要说的那句在续上后以消息形式送到；换号、回源号续、watchdog、wake、接管唤醒都是这样（watchdog 的搬迁直接走 handoff 的同一套）。
+- 续上的会话保留原名：cca 用 `/rename <原名>` 当启动提示（不用 `--name`，带它续会话会分叉出新编号；不改名则 Claude Code 会按提示词自动起名覆盖原名），原来要说的那句在续上后以消息形式送到；换号、回源号续、watchdog、wake、挂上唤醒都是这样（watchdog 的搬迁直接走 handoff 的同一套）。
 - 搬成功后源号面板里的条目会被清掉（只删面板条目，对话记录不动；带 worktree 的不删），换号记在 `~/.cca/moves.jsonl`；只有旧版本或清理失败才会残留 `stopped` 的旧条目。
 - 家目录里开的会话会改到 `~/llm` 里接着跑（家目录一次只能信任一个会话，后台起不来），所以会话尽量在项目目录里开。
 - 搬到 API 号前，如果 transcript 里有 tool search 记录会提醒（第三方端点会 422）：加 `--strip-tool-search` 先备份再剥掉。
@@ -340,7 +340,7 @@ cca relay --model opus          # 这次用 opus 档映射的模型
 | `401` | key 无效或被吊销；`cca doctor --online --probe-key` 真发一次最小请求验证 |
 | `400` 提到 `context_management` / `Extra inputs are not permitted` | `--env CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` |
 | `400` 提到 `thinking` / `adaptive` | `--env CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1` |
-| `400 … tool_use.signature` | Gemini 号跑过的历史；用 cca 续（`-r` / `handoff` / 接管）会自动清掉 |
+| `400 … tool_use.signature` | Gemini 号跑过的历史；用 cca 续（`-r` / `handoff` / 挂上）会自动清掉 |
 | `400` 上下文 / 输出超限 | 先看模型名有没有 `[1m]`、有没有压缩点；已经超过端点上限时只能裁：`cca trim <会话> --dry-run` |
 | 老是压缩、`/context` 显示 200k | 模型名没加 `[1m]`，见上文「上下文窗口」 |
 | 日志里 `[claude-code:unrecognized_model]` | 正常：模型名不在 Claude Code 的目录里 |
@@ -352,7 +352,7 @@ cca relay --model opus          # 这次用 opus 档映射的模型
 ## sideagent：让另一个号并行干活
 
 sideagent 是另一个号上的完整 Claude Code 会话：自己的上下文、工具和额度，干完自动把结果回报给派活的会话。
-用法照子代理（Agent / SendMessage），区别是**模型和额度由你挑**。派活、追问、接管都在**对话里用工具**；
+用法照子代理（Agent / SendMessage），区别是**模型和额度由你挑**。派活、追问、挂上都在**对话里用工具**；
 什么时候派、派给谁、交办怎么写，见共享 skill `sideagent`。
 
 ```bash
@@ -366,7 +366,7 @@ cca plugin install --all       # 面板插件；make install 和 cca add 已经�
 | `sideagent_send` | `account` 写号名 = 派新活（新实例，零上下文，干完退出）；写实例全名（`ds#a1b2c3`）= 追问那一个；写 `session` = 给别的会话发话（见下） |
 | `sideagent_result` / `sideagent_status` | 取结果 / 看状态（`doing` 是它这会儿在干什么） |
 | `sideagent_interrupt` / `sideagent_stop` | 打断这一轮（进程留着）/ 整个停掉 |
-| `sideagent_takeover` / `sideagent_release` | 接管已有的会话 / 从面板拿掉 |
+| `sideagent_attach` / `sideagent_detach` | 挂上已有的会话 / 从面板拿掉 |
 
 - **追问**：它在忙，消息在它下一个工具调用结束时送到（`mode: "queue"` 则等这一轮干完再开一轮）；已经退出就用它的会话记录接着开。
 - **回报**：后台派的活干完以 `<task-notification>` 自动送回（`notify: false` 就不送）；不要轮询。
@@ -382,28 +382,28 @@ sideagent_send {session: "<编号前缀|完整编号|标题>", message: "..."}
 不管它在哪个号、在跑还是已经 `done` / `stopped`，都能送到：cca 跨号找到这条会话现在挂的号
 （在跑的优先；否则最近一次登记的；handoff 留下的 `stopped` 旧登记排最后），没在跑就在那个号上
 `--bg --resume` 唤醒再投；那个号额度用满就换一个能用的号接着跑同一段对话。投的是原生跨会话消息，
-对方回话会回到你这里。**不接管、不进面板**，它的进度不会灌进你的上下文。
+对方回话会回到你这里。**不挂上、不进面板**，它的进度不会灌进你的上下文。
 
 原生 `SendMessage` 只认本号正在跑的会话，发不到时（not reachable、`ListAgents` 里没有）就用这个——
 会话没有「下线」这回事，也不用「等它上线」。只想看它在不在、在哪个号，用只读的 `cca sessions` 或
-`cca sideagent takeover-candidates --all`。
+`cca sideagent attach-candidates --all`。
 
-### 接管：在面板上持续看一条会话
+### 挂上：在面板上持续看一条会话
 
-`sideagent_takeover {session: ..., account: ...}` 把一条已有的会话挂到当前会话的面板上：它的进度、
+`sideagent_attach {session: ..., account: ...}` 把一条已有的会话挂到当前会话的面板上：它的进度、
 完成通知会一直送进当前会话，之后用返回的名字（如 `003#bg-36709e4a`）`sideagent_send`。适合要一起盯着干的活；
-只发一句话用上面的 `session`，不用接管。主会话退出时不停它；`sideagent_release` 只从面板拿掉，
-要停用 `cca <号> stop <短id>`。面板里 `/cca takeover [第一句话]` 打开挑选框。
+只发一句话用上面的 `session`，不用挂上。主会话退出时不停它；`sideagent_detach` 只从面板拿掉，
+要停用 `cca <号> stop <短id>`。面板里 `/cca attach [第一句话]` 打开挑选框。
 
 ### 面板
 
 输入框上方一个 sideagent 一行：谁在跑、在干什么（它那个号的小模型每 30 秒写一句进度，`cca set summary <号>` 改用哪个模型）、
 用了多久、多少 tokens。点一行看详情，底下能直接打字插话。鼠标点击要全屏渲染（`cca` 启动的会话默认就是；`cca set tui default|fullscreen` 切换）。
 
-### 接管会话的「请确认」在面板里点
+### 挂上会话的「请确认」在面板里点
 
-接管来的会话如果要人确认工具调用，装上权限钩子后确认会转到面板：那一行标黄，点开按 `y` 允许、`n` 拒绝，600 秒没人点按拒绝处理。
-没被接管的会话不受影响（照常弹原生确认框，每次多约 80 毫秒）。
+挂上来的会话如果要人确认工具调用，装上权限钩子后确认会转到面板：那一行标黄，点开按 `y` 允许、`n` 拒绝，600 秒没人点按拒绝处理。
+没被挂上的会话不受影响（照常弹原生确认框，每次多约 80 毫秒）。
 
 ```bash
 cca sideagent hook install --profile ds2     # 装到一个号（会先备份 settings.json）
@@ -411,7 +411,7 @@ cca sideagent hook install --all
 cca sideagent hook uninstall --profile ds2
 ```
 
-状态文件、归属怎么认、接管怎么同步、子代理派的 sideagent 怎么回报、怎么端到端测，见 [docs/internals.md](docs/internals.md)；
+状态文件、归属怎么认、挂上怎么同步、子代理派的 sideagent 怎么回报、怎么端到端测，见 [docs/internals.md](docs/internals.md)；
 和 Claude Code 子代理的逐项对照见 [docs/sideagent-vs-subagent.md](docs/sideagent-vs-subagent.md)。
 
 ## 维护

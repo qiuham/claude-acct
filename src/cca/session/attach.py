@@ -1,12 +1,12 @@
-"""接管 Claude Code 原生后台会话（`claude --bg`），挂到主会话的 sideagent 面板上。
+"""挂上 Claude Code 原生后台会话（`claude --bg`），挂到主会话的 sideagent 面板上。
 
 和 `cca sideagent` 的常驻进程不同：这里不包着 claude 跑，后台会话由 Claude Code 自己管，
 我们只做三件事：
 
-1. 接管（takeover）：找到会话在哪个号；没在跑就在原号用 `claude --bg --resume` 接着跑
+1. 挂上（attach）：找到会话在哪个号；没在跑就在原号用 `claude --bg --resume` 接着跑
    （原来就是后台会话的不带参数，保留原编号和原设置；普通会话加 bypassPermissions）；
    在 ~/.cca/sideagents/<名字>/ 写 state.json（kind=attached），在主会话的名单
-   ~/.cca/sessions/<编号>.json 里加一条，面板照常显示。同一个会话可以被好几个主会话接管（M 对 N）：
+   ~/.cca/sessions/<编号>.json 里加一条，面板照常显示。同一个会话可以被好几个主会话挂上（M 对 N）：
    文件夹只有一份、同步只有一份，各主会话的名单里各有一条。
 2. 同步（sync）：主会话的 MCP 服务后台线程每 2 秒同步一次（见 backends.sync_loop；
    MCP 不在时面板兜底调 `cca sideagent bg-sync <主会话>`），按上次读到的位置
@@ -14,7 +14,7 @@
    翻译成面板认得的事件和进度行；状态从原号的登记表 <配置目录>/sessions/*.json 取。
 3. 发话：走原生的跨会话消息（和 sideagent 回报主会话同一个套接字协议）。
 
-总控（主会话）退出时不停这些会话，拿掉用 release（只从我的名单里删，最后一个主人放手才算停）。
+总控（主会话）退出时不停这些会话，拿掉用 detach（只从我的名单里删，最后一个主人放手才算停）。
 """
 
 from __future__ import annotations
@@ -32,10 +32,10 @@ from pathlib import Path
 
 from cca.account.model import discover_profiles
 from cca.config import (
+    ATTACH_CARD_ROUNDS,
+    ATTACH_CARD_TOTAL_CHARS,
+    ATTACH_CARD_TURN_CHARS,
     TAKEN_BY_ASK_CHARS,
-    TAKEOVER_CARD_ROUNDS,
-    TAKEOVER_CARD_TOTAL_CHARS,
-    TAKEOVER_CARD_TURN_CHARS,
 )
 from cca.errors import say
 from cca.paths import profile_dir
@@ -62,7 +62,7 @@ def record_name(account: str, session_id: str, job_id: str = "") -> str:
 
 
 def is_bg(name: str) -> bool:
-    """是不是接管的会话（state.json 里 kind=attached）。"""
+    """是不是挂上的会话（state.json 里 kind=attached）。"""
     state = sideagent._read_state(name)  # noqa: SLF001
     return bool(state) and roster.kind_of(state) == roster.ATTACHED
 
@@ -73,7 +73,7 @@ def _claude() -> str:
     return shutil.which("claude") or "claude"
 
 
-AGENTS_LIST_TIMEOUT = 20   # handoff / takeover 取单号列表的默认超时；cca agents 总表传更短的
+AGENTS_LIST_TIMEOUT = 20   # handoff / attach 取单号列表的默认超时；cca agents 总表传更短的
 
 
 def agents_or_none(account: str, timeout: float = AGENTS_LIST_TIMEOUT) -> list | None:
@@ -233,7 +233,7 @@ def _said_text(item: dict) -> str:
                     if isinstance(block, dict) and block.get("type") == "text").strip()
 
 
-def recent_rounds(session_id: str, rounds: int = TAKEOVER_CARD_ROUNDS) -> list:
+def recent_rounds(session_id: str, rounds: int = ATTACH_CARD_ROUNDS) -> list:
     """最近几轮问答的原话：[(问, 答)]，答取这一轮它最后说的那段；只读文件末尾一段。"""
     path = transcript(session_id) if session_id else None
     if path is None or rounds <= 0:
@@ -264,12 +264,12 @@ def recent_rounds(session_id: str, rounds: int = TAKEOVER_CARD_ROUNDS) -> list:
 
 
 def card(session_id: str, *, account: str = "", title: str = "", state: str = "") -> str:
-    """接管时交给主会话的“卡片”：这个会话在干什么，几行字，不把整段对话塞进来。
+    """挂上时交给主会话的“卡片”：这个会话在干什么，几行字，不把整段对话塞进来。
 
     依次是：Claude Code 自己写的回顾（recap，只有人离开一阵再回来才有）、最近几轮问答的原话、
     对话记录的路径（要细节自己去翻）。轮数、每段字数、总字数在 config 里。
     """
-    lines = [f"接管了 {account}/{session_id[:8]}「{title or '无标题'}」" + (f"（{state}）" if state else "")]
+    lines = [f"挂上了 {account}/{session_id[:8]}「{title or '无标题'}」" + (f"（{state}）" if state else "")]
     summary = recap(session_id)
     if summary:
         lines.append("回顾：" + _clip(summary))
@@ -277,12 +277,12 @@ def card(session_id: str, *, account: str = "", title: str = "", state: str = ""
     if pairs:
         lines.append(f"最近 {len(pairs)} 轮：")
         for ask, said in pairs:
-            lines.append("  问：" + _clip(ask, TAKEOVER_CARD_TURN_CHARS))
+            lines.append("  问：" + _clip(ask, ATTACH_CARD_TURN_CHARS))
             if said:
-                lines.append("  答：" + _clip(said, TAKEOVER_CARD_TURN_CHARS))
+                lines.append("  答：" + _clip(said, ATTACH_CARD_TURN_CHARS))
     text = "\n".join(lines)
-    if len(text) > TAKEOVER_CARD_TOTAL_CHARS:
-        text = text[:TAKEOVER_CARD_TOTAL_CHARS] + "…"
+    if len(text) > ATTACH_CARD_TOTAL_CHARS:
+        text = text[:ATTACH_CARD_TOTAL_CHARS] + "…"
     path = transcript(session_id) if session_id else None
     if path is not None:
         text += f"\n对话记录：{path}"
@@ -298,7 +298,7 @@ def _owner_title(session: str) -> str:
 
 
 def _taken(owner_session: str) -> tuple[set, dict]:
-    """(被我接管的会话编号, {会话编号: [别的主人的标题或短编号]})。"""
+    """(被我挂上的会话编号, {会话编号: [别的主人的标题或短编号]})。"""
     mine = roster.mine(owner_session) if owner_session else {}
     mine_sessions: set = set()
     mine_chain = set(roster.chain_sessions(owner_session)) if owner_session else set()
@@ -368,16 +368,16 @@ def one_per_session(rows: list) -> list:
 
 
 def picker_rows(*, include_running: bool = False, owner_session: str = "") -> list:
-    """挑选框用的列表：默认只列没在跑的；一个会话一行，带上标题、人最后交给它的话、被谁接管。"""
+    """挑选框用的列表：默认只列没在跑的；一个会话一行，带上标题、人最后交给它的话、被谁挂上。"""
     taken_over, taken_by = _taken(owner_session)
-    # 派出的 sideagent 自己的会话不能接管（只有一个主人），也不列；它的登记表条目会被抄到主会话那个号里，看着像普通会话
+    # 派出的 sideagent 自己的会话不能挂上（只有一个主人），也不列；它的登记表条目会被抄到主会话那个号里，看着像普通会话
     spawned = _spawned_sessions()
     rows = []
     for row in one_per_session([one for one in candidates()
                                  if one["state"] not in ("stopped", "failed") and one["session_id"] not in spawned]):
         # 停掉的、失败的会话不列（人主动停的、早就收掉的、起不来的）
         if row["session_id"] == owner_session:
-            continue                     # 自己不能接管自己
+            continue                     # 自己不能挂上自己
         if not include_running and row["state"] in RUNNING_STATES:
             continue
         path = transcript(row["session_id"]) if row["session_id"] else None
@@ -388,7 +388,7 @@ def picker_rows(*, include_running: bool = False, owner_session: str = "") -> li
         rows.append({**row, "title": row["name"] or session_name(path), "last": last_line(row["session_id"]),
                      "ask": last_ask(row["session_id"]),
                      "taken_over": row["session_id"] in taken_over,
-                     # M 对 N：被别的会话接管了照样能选，挑选框写“已被 X 接管”
+                     # M 对 N：被别的会话挂上了照样能选，挑选框写“已被 X 挂上”
                      "taken_by": taken_by.get(row["session_id"], []), "active_at": active_at})
     # 最近还在用的排在上面
     rows.sort(key=lambda one: one["active_at"], reverse=True)
@@ -396,7 +396,7 @@ def picker_rows(*, include_running: bool = False, owner_session: str = "") -> li
 
 
 def candidates(accounts: list | None = None) -> list:
-    """本机各号能接管的会话：后台会话（含已结束的）和在跑的交互会话。"""
+    """本机各号能挂上的会话：后台会话（含已结束的）和在跑的交互会话。"""
     return candidates_checked(accounts)[0]
 
 
@@ -493,7 +493,7 @@ def _from_transcript(key: str, account: str) -> dict:
             "state": "ended", "running": False}
 
 
-# ---------------------------------------------------------------- 接管
+# ---------------------------------------------------------------- 挂上
 
 
 REGISTER_WAIT = 60
@@ -637,11 +637,11 @@ def _spawned_owner(session_id: str) -> str:
     return ""
 
 
-def takeover(key: str, owner: dict, *, account: str = "") -> dict:
-    """接管一个会话；返回 {name, ...} 或 {error}。owner 是主会话的归属（owner_of，外加 account）。
+def attach(key: str, owner: dict, *, account: str = "") -> dict:
+    """挂上一个会话；返回 {name, ...} 或 {error}。owner 是主会话的归属（owner_of，外加 account）。
 
-    M 对 N：这个会话已经被别人接管过（有 sideagents/<名字>/）就不重建、不覆盖，只在我的名单里加一条；
-    同步只有一份，大家共用。别人派出的 sideagent 不能接管（它只有一个主人）。
+    M 对 N：这个会话已经被别人挂上过（有 sideagents/<名字>/）就不重建、不覆盖，只在我的名单里加一条；
+    同步只有一份，大家共用。别人派出的 sideagent 不能挂上（它只有一个主人）。
     """
     rows = candidates([account] if account else None)
     hits = find(key, rows)
@@ -649,7 +649,7 @@ def takeover(key: str, owner: dict, *, account: str = "") -> dict:
         row = _from_transcript(key, account or owner.get("account") or sideagent._owner_account())  # noqa: SLF001
         hits = [row] if row else []
     if not hits:
-        return {"error": f"找不到会话 {key}；不带参数调 sideagent_takeover 看能接管哪些"}
+        return {"error": f"找不到会话 {key}；不带参数调 sideagent_attach 看能挂上哪些"}
     hits, ambiguous = narrow_by_name(hits)
     if ambiguous:
         return {"error": f"{key} {ambiguous}"}
@@ -657,7 +657,7 @@ def takeover(key: str, owner: dict, *, account: str = "") -> dict:
     row = min(hits, key=_registration_rank)
     spawner = _spawned_owner(row["session_id"])
     if spawner:
-        return {"error": f"这是 {spawner} 派出的 sideagent，不能接管"}
+        return {"error": f"这是 {spawner} 派出的 sideagent，不能挂上"}
     entry = registry_entry(row["account"], row["session_id"])
     woke = False
     if not entry:
@@ -673,7 +673,7 @@ def takeover(key: str, owner: dict, *, account: str = "") -> dict:
     with STATE_LOCK:
         existing = sideagent._read_state(name)  # noqa: SLF001
         if existing and roster.kind_of(existing) == roster.ATTACHED:
-            # 别人接管过：不重建、不覆盖；大家都放手后停过的，接着同步（读到哪还记着）
+            # 别人挂上过：不重建、不覆盖；大家都放手后停过的，接着同步（读到哪还记着）
             if existing.get("finished_at"):
                 existing.pop("finished_at", None)
                 sideagent._write_state(name, existing)  # noqa: SLF001
@@ -698,7 +698,7 @@ def takeover(key: str, owner: dict, *, account: str = "") -> dict:
 
 
 def _attached_name_for(session_id: str) -> str:
-    """这个会话已经有接管记录（可能记在旧号下，例如换号重启前接管的）：复用它，面板上不出两条。"""
+    """这个会话已经有挂上记录（可能记在旧号下，例如换号重启前挂上的）：复用它，面板上不出两条。"""
     for other in sideagent.agent_names(include_finished=True):
         state = sideagent._read_state(other)  # noqa: SLF001
         if roster.kind_of(state) == roster.ATTACHED and state.get("session_id") == session_id:
@@ -706,8 +706,8 @@ def _attached_name_for(session_id: str) -> str:
     return ""
 
 
-def release(name: str, session: str) -> int:
-    """放手（规则 5）：只从我的名单里删这一条；会话本身不动。返回还有几个活着的主人挂着它（-1 表示不是接管的）。
+def detach(name: str, session: str) -> int:
+    """放手（规则 5）：只从我的名单里删这一条；会话本身不动。返回还有几个活着的主人挂着它（-1 表示不是挂上的）。
 
     没有活着的主人了：删 run/、state.json 写 finished_at，其余文件留着（过了保留天数再清）。
     """
@@ -724,7 +724,7 @@ def release(name: str, session: str) -> int:
 
 
 def tell(name: str, text: str, sender: dict) -> str:
-    """给接管的会话发一句（原生跨会话消息）。返回错误，空串是成功。sender 是主会话登记条目。"""
+    """给挂上的会话发一句（原生跨会话消息）。返回错误，空串是成功。sender 是主会话登记条目。"""
     state = sideagent._read_state(name)  # noqa: SLF001
     entry = registry_entry(str(state.get("account") or ""), str(state.get("session_id") or ""))
     if not entry.get("messagingSocketPath"):
@@ -732,7 +732,7 @@ def tell(name: str, text: str, sender: dict) -> str:
     return deliver(entry, text, sender)
 
 
-# ---------------------------------------------------------------- 按会话发话（不接管）
+# ---------------------------------------------------------------- 按会话发话（不挂上）
 
 
 def _registration_rank(row: dict) -> tuple:
@@ -745,7 +745,7 @@ def _registration_rank(row: dict) -> tuple:
 
 
 def message(key: str, text: str, sender: dict, *, account: str = "", usable=None) -> dict:
-    """给一条会话发一句话，**不接管**：它挂在哪个号就发到哪个号，没在跑就先唤醒。
+    """给一条会话发一句话，**不挂上**：它挂在哪个号就发到哪个号，没在跑就先唤醒。
 
     返回 {account, session_id, label, woke} 或 {error}。sender 是主会话的登记条目（含 sessionId、
     messagingSocketPath、name），对方回话照原生跨会话消息回到它那里。
@@ -989,7 +989,7 @@ def _scan(lines: list, state: dict) -> tuple[list, list, dict]:
 
 
 def _post_turn_end(name: str, state: dict, event: dict, offset: int) -> None:
-    """接管的会话一轮结束：给每个挂着它的主会话的收件箱存一条通知（面板来取）。
+    """挂上的会话一轮结束：给每个挂着它的主会话的收件箱存一条通知（面板来取）。
 
     键用读到的位置：同一轮结束不管同步几次，都只有一条。
     """
@@ -1071,9 +1071,9 @@ def _first_pending(name: str) -> dict | None:
 
 
 def sync_one(name: str) -> dict:
-    """把一个接管的会话同步一次：新事件写进 events.jsonl/progress，状态写进 state.json。
+    """把一个挂上的会话同步一次：新事件写进 events.jsonl/progress，状态写进 state.json。
 
-    好几个主会话接管同一个时，各自的 MCP 后台线程都会来同步：同一时刻只让一个做（跨进程文件锁），
+    好几个主会话挂上同一个时，各自的 MCP 后台线程都会来同步：同一时刻只让一个做（跨进程文件锁），
     别的直接拿现在的状态走，事件不会写两遍。
     """
     with STATE_LOCK:

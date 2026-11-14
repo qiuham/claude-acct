@@ -1,6 +1,6 @@
 import { expect, mock, test as rawTest } from 'claude-code/testing'
 import { bandMark, circleOf } from '../hooks/marks.js'
-import { agoText, sessionRow, stateLook, summaryText, takenText } from '../hooks/takeover-picker.js'
+import { agoText, sessionRow, stateLook, summaryText, takenText } from '../hooks/attach-picker.js'
 import { checkMark, columnWidths } from '../hooks/list-pane.js'
 import { ccaCompletions } from '../hooks/cca-command.js'
 import { otherTasksText } from '../hooks/register.js'
@@ -1890,15 +1890,15 @@ test('详情页标题右边：号 · 模型 · 词元；缺哪项就不写哪项
   expect(headerMeta('ds2', {})).toBe('ds2')
 })
 
-// 接管的原生后台会话（sideagent_takeover）：没有我们的套接字也显示；等确认标黄；每次刷新先 bg-sync
-test('接管的原生后台会话：没有套接字也显示，等确认标黄并写卡在哪，刷新时先让 cca 同步', async ($, on) => {
+// 挂上的原生后台会话（sideagent_attach）：没有我们的套接字也显示；等确认标黄；每次刷新先 bg-sync
+test('挂上的原生后台会话：没有套接字也显示，等确认标黄并写卡在哪，刷新时先让 cca 同步', async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, { HOME, CLAUDE_CODE_SESSION_ID: SID })
   on('command.register', () => ({ value: undefined }))
   on('session.start', () => ({ cwd: HOME }))
   on('ui.render', () => ({ type: 'Text', props: {}, children: ['x'] }))
   on('fs.list', () => ({ value: [{ name: '003#bg-707148f7.json', kind: 'file', size: 10, isLink: false }] }))
-  // 套接字不存在：普通 sideagent 会被当成没在跑，接管的会话不看这个
+  // 套接字不存在：普通 sideagent 会被当成没在跑，挂上的会话不看这个
   on('fs.exists', ($, e) => ({ value: !String(e.path).endsWith('.sock') }))
   const events = [
     { kind: 'task', text: 'Run the bash command: touch /tmp/x' },
@@ -1921,7 +1921,7 @@ test('接管的原生后台会话：没有套接字也显示，等确认标黄�
   const band = await $.ui.mount({ ...SITE, surface: 'terminal' })
   expect(await findAny(band, { type: 'Text', text: /等确认：Bash\(touch \/tmp\/x\)/ })).toBeDefined()
   await band.unmount()
-  // 看到接管的会话以后，下一次刷新先跑 bg-sync
+  // 看到挂上的会话以后，下一次刷新先跑 bg-sync
   await clock.advance(20000)
   expect(ran.some((argv) => argv.join(' ') === 'cca sideagent bg-sync ' + SID)).toBe(true)
 })
@@ -1956,7 +1956,7 @@ test('waitingWhat 写出卡住的工具', () => {
   expect(waitingWhat([], { waiting_for: 'permission prompt' })).toContain('permission prompt')
 })
 
-// 接管挑选框（/takeover、sideagent_takeover 没给会话）
+// 挂上挑选框（/attach、sideagent_attach 没给会话）
 const CANDIDATES = [
   { account: '006', id: '7e6a6b38', session_id: '7e6a6b38-aaaa', name: 'backt', title: 'backt', kind: 'background',
     cwd: '/mnt/work/src/winter/llm/factor', state: 'blocked', running: false, last: '回测跑完了', taken_over: false },
@@ -1975,10 +1975,10 @@ async function startPicker($: any, on: any, extra?: (on: any) => void) {
   const ran: string[][] = []
   on('process.run', ($: any, e: any) => {
     ran.push([...e.argv])
-    if (e.argv.includes('takeover-candidates')) return { value: { exitCode: 0, stdout: JSON.stringify(CANDIDATES), stderr: '' } }
-    if (e.argv.includes('takeover')) {
+    if (e.argv.includes('attach-candidates')) return { value: { exitCode: 0, stdout: JSON.stringify(CANDIDATES), stderr: '' } }
+    if (e.argv.includes('attach')) {
       return { value: { exitCode: 0, stdout: JSON.stringify({ name: '006#bg-' + e.argv[3].slice(0, 8), account: '006',
-        session_id: e.argv[3], label: 'backtest', card: '接管了 006/' + e.argv[3].slice(0, 8) + '「backtest」\n回顾：回测跑完了' }), stderr: '' } }
+        session_id: e.argv[3], label: 'backtest', card: '挂上了 006/' + e.argv[3].slice(0, 8) + '「backtest」\n回顾：回测跑完了' }), stderr: '' } }
     }
     return { value: { exitCode: 0, stdout: 'v\n', stderr: '' } }
   })
@@ -1991,16 +1991,16 @@ async function startPicker($: any, on: any, extra?: (on: any) => void) {
   return { registered, ran, opened, closed }
 }
 
-const PICKER_PANE = { plugin: 'sideagents-panel', component: 'Pane', requestId: 'takeover-picker',
+const PICKER_PANE = { plugin: 'sideagents-panel', component: 'Pane', requestId: 'attach-picker',
   viewport: { columns: 120, rows: 30 },
-  props: { title: '接管会话', bodyColumns: 110, placement: 'inline', scroll: { offset: 0, bodyRows: 20 }, view: {} } }
+  props: { title: '挂上会话', bodyColumns: 110, placement: 'inline', scroll: { offset: 0, bodyRows: 20 }, view: {} } }
 
-test('/cca takeover 打开挑选框：列出会话，回车勾选，y 接管勾选的', async ($, on) => {
+test('/cca attach 打开挑选框：列出会话，回车勾选，y 挂上勾选的', async ($, on) => {
   const { registered, ran, opened, closed } = await startPicker($, on)
   expect(registered.find((one) => one.name === 'cca')).toBeDefined()
-  await $.command.run({ command: 'cca', args: 'takeover' } as any)
-  expect(opened[0]).toMatchObject({ id: 'takeover-picker', focus: true })
-  expect(ran.some((argv) => argv.join(' ') === 'cca sideagent takeover-candidates --all')).toBe(true)
+  await $.command.run({ command: 'cca', args: 'attach' } as any)
+  expect(opened[0]).toMatchObject({ id: 'attach-picker', focus: true })
+  expect(ran.some((argv) => argv.join(' ') === 'cca sideagent attach-candidates --all')).toBe(true)
   const pane = await $.ui.mount({ ...PICKER_PANE, surface: 'terminal' } as any)
   // 一个会话一行：标题、号、原生状态（等确认用醒目色）、多久前、人最后交给它的话（没有就用它最后说的一句）
   expect(await pane.find({ type: 'Text', text: '006' })).toBeDefined()
@@ -2011,27 +2011,27 @@ test('/cca takeover 打开挑选框：列出会话，回车勾选，y 接管勾�
   expect(await pane.find({ type: 'Text', text: '[x]' })).toBeDefined()
   expect((await pane.find({ key: 'pick-confirm' }))?.props?.hotkey).toBe('y')
   await pane.press({ key: 'pick-confirm' })
-  // 只接管勾选的那一个，接完关掉挑选框
-  const takeovers = ran.filter((argv) => argv.includes('takeover'))
-  expect(takeovers).toEqual([['cca', 'sideagent', 'takeover', '7e6a6b38-aaaa', '--account=006']])
-  expect(closed).toContain('takeover-picker')
+  // 只挂上勾选的那一个，接完关掉挑选框
+  const takeovers = ran.filter((argv) => argv.includes('attach'))
+  expect(takeovers).toEqual([['cca', 'sideagent', 'attach', '7e6a6b38-aaaa', '--account=006']])
+  expect(closed).toContain('attach-picker')
 })
 
-test('模型调 sideagent_takeover 没给会话：打开挑选框，回话让模型等人挑；给了会话就照常调', async ($, on) => {
+test('模型调 sideagent_attach 没给会话：打开挑选框，回话让模型等人挑；给了会话就照常调', async ($, on) => {
   const seen: any[] = []
   const { opened } = await startPicker($, on, (hook) => {
     hook('tool.call', ($: any, e: any) => { seen.push(e); return { result: 'engine', text: 'engine' } })
   })
-  const answer: any = await $.tool.call({ tool: 'mcp__sideagents__sideagent_takeover' } as any)
-  expect(opened.map((one) => one.id)).toContain('takeover-picker')
+  const answer: any = await $.tool.call({ tool: 'mcp__sideagents__sideagent_attach' } as any)
+  expect(opened.map((one) => one.id)).toContain('attach-picker')
   expect(String(answer?.result || '')).toContain('不要替用户决定')
   expect(seen).toEqual([])
-  await $.tool.call({ tool: 'mcp__sideagents__sideagent_takeover', session: '7e6a6b38' } as any)
+  await $.tool.call({ tool: 'mcp__sideagents__sideagent_attach', session: '7e6a6b38' } as any)
   expect(seen.length).toBe(1)
 })
 
 // 钩子转来的“请确认”：横条标黄写“等你确认”，详情页顶上两个按钮，按了调 cca permission-answer
-test('接管会话的请确认转到面板：横条标黄，详情页按 y 允许就回答这条请求', async ($, on) => {
+test('挂上会话的请确认转到面板：横条标黄，详情页按 y 允许就回答这条请求', async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, { HOME, CLAUDE_CODE_SESSION_ID: SID })
   on('command.register', () => ({ value: undefined }))
@@ -2111,7 +2111,7 @@ test('会话中途接上别的对话（编号变了）：按新编号认 sideage
   expect(await findAny(ui, { type: 'Text', text: 'ds' })).toBeDefined()
 })
 
-test('接管的原生会话不标“旧版”：进程不是我们起的', async ($, on) => {
+test('挂上的原生会话不标“旧版”：进程不是我们起的', async ($, on) => {
   const { clock } = busyPeer(on, { state: { kind: 'attached', code_version: 'old' }, version: 'new' })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: HOME })
   await clock.advance(1500)
@@ -2121,7 +2121,7 @@ test('接管的原生会话不标“旧版”：进程不是我们起的', async
   expect(row.warnText).not.toContain('旧版')
 })
 
-test('接管挑选框：状态上色、多久前、勾选符号、各列按显示宽度对齐', () => {
+test('挂上挑选框：状态上色、多久前、勾选符号、各列按显示宽度对齐', () => {
   // 状态照原生的字，只上颜色
   expect(stateLook('working')).toEqual({ text: 'working', color: 'warning' })
   expect(stateLook('blocked')).toEqual({ text: 'blocked', color: 'error' })
@@ -2176,26 +2176,26 @@ test('对话被挪到后台换了编号（/bg）：原来那段对话派的 side
   expect(asked[0]).toEqual(['cca', 'sideagent', 'latest', 'old-fg'])
 })
 
-test('/cca 不带参数弹菜单：回车进接管；不认识的子命令给出可用的', async ($, on) => {
+test('/cca 不带参数弹菜单：回车进挂上；不认识的子命令给出可用的', async ($, on) => {
   const { opened } = await startPicker($, on)
   await $.command.run({ command: 'cca', args: '' } as any)
   expect(opened[0]).toMatchObject({ id: 'cca-menu', focus: true })
   const menu = await $.ui.mount({ ...PICKER_PANE, requestId: 'cca-menu', surface: 'terminal' } as any)
-  expect(await menu.find({ type: 'Text', text: 'takeover' })).toBeDefined()
+  expect(await menu.find({ type: 'Text', text: 'attach' })).toBeDefined()
   for (const name of ['handoff', 'watchdog']) expect(await menu.find({ type: 'Text', text: name })).toBeUndefined()
-  await menu.press({ key: 'menu-takeover' })
-  expect(opened.map((one) => one.id)).toContain('takeover-picker')
+  await menu.press({ key: 'menu-attach' })
+  expect(opened.map((one) => one.id)).toContain('attach-picker')
   const answer: any = await $.command.run({ command: 'cca', args: 'nope' } as any)
-  expect(String(answer?.text || '')).toContain('takeover')
+  expect(String(answer?.text || '')).toContain('attach')
   // 换号、看门狗已不在面板里
   const gone: any = await $.command.run({ command: 'cca', args: 'handoff' } as any)
   expect(String(gone?.text || '')).toContain('不认识的子命令')
 })
 
-test('敲 /cca t… 时补全列表给出子命令；不是 /cca 的不管', () => {
-  expect(ccaCompletions({ text: '/cca t', cursor: 6 }).map((one: any) => one.text)).toEqual(['takeover'])
+test('敲 /cca a… 时补全列表给出子命令；不是 /cca 的不管', () => {
+  expect(ccaCompletions({ text: '/cca a', cursor: 6 }).map((one: any) => one.text)).toEqual(['attach'])
   expect(ccaCompletions({ text: '/cca w', cursor: 6 })).toEqual([])
-  expect(ccaCompletions({ text: '/cca takeover 先看', cursor: 15 })).toEqual([])
+  expect(ccaCompletions({ text: '/cca attach 先看', cursor: 15 })).toEqual([])
   expect(ccaCompletions({ text: '/model t', cursor: 8 })).toEqual([])
 })
 
@@ -2231,7 +2231,7 @@ function rosterOf(session: string, agents: Record<string, any>) {
   return JSON.stringify({ session, account: '005', pid: 1, proc_start: 'p1', agents })
 }
 
-rawTest('新格式：横条按本会话名单读；派出的画 ◯，接管的画 ◇（不写“接管”）；别的会话名单里的不出现', async ($, on) => {
+rawTest('新格式：横条按本会话名单读；派出的画 ◯，挂上的画 ◇（不写“挂上”）；别的会话名单里的不出现', async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, { HOME, CLAUDE_CODE_SESSION_ID: SID })
   on('command.register', () => ({ value: undefined }))
@@ -2247,7 +2247,7 @@ rawTest('新格式：横条按本会话名单读；派出的画 ◯，接管的�
     [DIR + '/ds#a1/state.json']: JSON.stringify({ kind: 'spawned', busy: true, started: 0, code_version: 'v' }),
     [DIR + '/ds#a1/progress']: 'TOOL Bash · ls -la\n',
     [DIR + '/ds#a1/run/sock']: '',
-    // 接管的：没有 run/sock 也显示
+    // 挂上的：没有 run/sock 也显示
     [DIR + '/003#bg-12345678/state.json']: JSON.stringify({ kind: 'attached', busy: false, status: 'idle',
       label: 'exp-a', started: 0 }),
     [DIR + '/ds#o9/state.json']: JSON.stringify({ kind: 'spawned', busy: true, started: 0 }),
@@ -2264,11 +2264,11 @@ rawTest('新格式：横条按本会话名单读；派出的画 ◯，接管的�
   expect(shown.map((row: any) => row.name).sort()).toEqual(['003#bg-12345678', 'ds#a1'])
   expect(shown.find((row: any) => row.name === '003#bg-12345678').attached).toBe(true)
   expect(shown.find((row: any) => row.name === 'ds#a1').attached).toBe(false)
-  // 名字列：派出的用名单里记的名字，接管的用会话标题
+  // 名字列：派出的用名单里记的名字，挂上的用会话标题
   expect(shown.find((row: any) => row.name === 'ds#a1').label).toBe('查日志')
   expect(await findAny(ui, { type: 'Text', text: '◯ ' })).toBeDefined()
   expect(await findAny(ui, { type: 'Text', text: '◇ ' })).toBeDefined()
-  expect(await findAny(ui, { type: 'Text', text: /接管/ })).toBeUndefined()
+  expect(await findAny(ui, { type: 'Text', text: /挂上/ })).toBeUndefined()
   expect(await findAny(ui, { type: 'Text', text: /别人的/ })).toBeUndefined()
 })
 
@@ -2326,7 +2326,7 @@ rawTest('新格式：sideagent 自己用 SendMessage 发的话，按发件 socke
   expect(sent[0].to).toBe('a1')
 })
 
-rawTest('圆点：派出的 ◯/●，接管的 ◇/◆；接管挑选框里被别的会话接管的写“已被 X 接管”', () => {
+rawTest('圆点：派出的 ◯/●，挂上的 ◇/◆；挂上挑选框里被别的会话挂上的写“已被 X 挂上”', () => {
   expect(circleOf(false, false)).toBe('◯')
   expect(circleOf(false, true)).toBe('●')
   expect(circleOf(true, false)).toBe('◇')
@@ -2334,7 +2334,7 @@ rawTest('圆点：派出的 ◯/●，接管的 ◇/◆；接管挑选框里被�
   expect(bandMark({ attached: true }, false).mark).toBe('◇')
   expect(bandMark({ attached: true }, true).mark).toBe('◆')
   expect(bandMark({}, false).mark).toBe('○')
-  expect(takenText({ taken_by: ['ham-b3', 'de9cdb1b'], ask: '加节点' })).toBe('已被 ham-b3、de9cdb1b 接管 · 加节点')
+  expect(takenText({ taken_by: ['ham-b3', 'de9cdb1b'], ask: '加节点' })).toBe('已被 ham-b3、de9cdb1b 挂上 · 加节点')
   expect(takenText({ taken_by: [], last: '好了' })).toBe('好了')
   expect(takenText({})).toBe('')
 })

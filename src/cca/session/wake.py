@@ -32,7 +32,7 @@ from cca.errors import die, note, say
 from cca.paths import accounts_root
 
 NUDGE = "额度已重置，继续刚才没做完的事。"
-# 一轮里所有「重开后等套接字登记再投话」共用的等待预算（每条的上限是 takeover.REGISTER_WAIT）；
+# 一轮里所有「重开后等套接字登记再投话」共用的等待预算（每条的上限是 attach.REGISTER_WAIT）；
 # 常驻进程（watchdog）每轮都要调，不能让几条起不来的会话把一轮拖几分钟。用完的各试一次，
 # 没送到的留在 state 里，下一轮见它闲着就直接发话。
 ROUND_DELIVER_BUDGET = 60
@@ -206,7 +206,7 @@ def forget(session: str) -> bool:
 def _live_entries(session: str) -> list:
     """它在哪些号上有活着的进程：[(号, 登记表条目)]。条目里 status 是 busy / idle / waiting。"""
     from cca.account.model import discover_profiles  # noqa: PLC0415
-    from cca.session.takeover import registry_entry  # noqa: PLC0415
+    from cca.session.attach import registry_entry  # noqa: PLC0415
 
     return [(name, entry) for name in discover_profiles() if (entry := registry_entry(name, session))]
 
@@ -247,21 +247,21 @@ def _plan(session: str, entry: dict) -> tuple:
 
 
 def _budget_left(budget_end: float) -> float:
-    """这一轮还剩多少等待预算，单条不超过 takeover.REGISTER_WAIT。"""
-    from cca.session.takeover import REGISTER_WAIT  # noqa: PLC0415
+    """这一轮还剩多少等待预算，单条不超过 attach.REGISTER_WAIT。"""
+    from cca.session.attach import REGISTER_WAIT  # noqa: PLC0415
 
     return min(float(REGISTER_WAIT), max(0.0, budget_end - time.time()))
 
 
 def _tell(registry: dict) -> str:
     """进程还在、闲着的会话：发一句话让它接着做（原生跨会话消息），不另起一份。"""
-    from cca.session.takeover import deliver  # noqa: PLC0415
+    from cca.session.attach import deliver  # noqa: PLC0415
 
     return deliver(registry, NUDGE, {"name": "cca wake"})
 
 
 def _wake(entry: dict, session: str, *, wait: float | None = None) -> str:
-    """在原号上重开并说一句。返回错误，空串表示已发出。wait 是等套接字的上限，不给用 takeover 的默认。"""
+    """在原号上重开并说一句。返回错误，空串表示已发出。wait 是等套接字的上限，不给用 attach 的默认。"""
     from cca.env import LaunchBlocked, session_env  # noqa: PLC0415 - 起进程时才需要
 
     exe = shutil.which("claude")
@@ -273,7 +273,11 @@ def _wake(entry: dict, session: str, *, wait: float | None = None) -> str:
     except LaunchBlocked as exc:
         return str(exc)
     cwd = entry.get("cwd") if entry.get("cwd") and Path(entry["cwd"]).is_dir() else None
-    from cca.session.takeover import clear_stale_registrations, deliver_after_resume, resume_launch  # noqa: PLC0415
+    from cca.session.attach import (  # noqa: PLC0415
+        clear_stale_registrations,
+        deliver_after_resume,
+        resume_launch,
+    )
 
     # 有原名：启动提示是 /rename <原名>，NUDGE 等登记好再以消息送到；没名字照旧
     launch, pending = resume_launch(entry["account"], session, NUDGE)

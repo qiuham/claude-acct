@@ -287,7 +287,10 @@ def _check_session_tz(names: list, report: _Report, *, interactive: bool = True)
     claude 的后台守护进程把第一次拉起时的 TZ 记住，客户端后来传的 TZ 不采纳，
     所以光改代码不够，必须把进程杀掉重建。出口探测失败时不动手：探测失败不等于时区不对。
     """
-    from cca.env import expected_session_tz, running_session_tz  # noqa: PLC0415 - 只在真有会话在跑时才探测出口
+    from cca.env import (  # noqa: PLC0415 - 只在真有会话在跑时才探测出口
+        expected_session_tz,
+        running_session_tz,
+    )
 
     skip = _ancestor_pids()
     planned = []                      # (号, pid, TZ, 出口时区)

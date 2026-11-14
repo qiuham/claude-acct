@@ -28,11 +28,11 @@ class BackendForTest(unittest.TestCase):
         self.assertIs(backends.backend_for(""), backends.BACKENDS[roster.SPAWNED])
 
     def test_taken_over_session(self):
-        # 接管的写 kind=attached（老格式由迁移脚本转好，运行时不认）
+        # 挂上的写 kind=attached（老格式由迁移脚本转好，运行时不认）
         sideagent._write_state("003#bg-1234abcd", {"kind": "attached"})  # noqa: SLF001
         backend = backends.backend_for("003#bg-1234abcd")
         self.assertIs(backend, backends.BACKENDS[roster.ATTACHED])
-        # 接管的会话：主会话退出不停它、不走后台任务、停和打断都拒绝并说明原因
+        # 挂上的会话：主会话退出不停它、不走后台任务、停和打断都拒绝并说明原因
         self.assertTrue(backend.outlives_owner)
         self.assertFalse(backend.takes_jobs)
         self.assertIn("claude stop", backend.stop("003#bg-1234abcd"))
@@ -63,7 +63,7 @@ class SyncLoopTest(unittest.TestCase):
 
     def test_only_this_sessions_taken_over_ones_are_synced(self):
         seen = []
-        with mock.patch.object(backends.TakenOverBackend, "sync", lambda _self, name, **_kw: seen.append(name) or {}):
+        with mock.patch.object(backends.AttachedBackend, "sync", lambda _self, name, **_kw: seen.append(name) or {}):
             self.assertEqual(backends.sync_owned("S1"), 1)
         self.assertEqual(seen, ["003#bg-aaaa1111"])
 
@@ -76,7 +76,7 @@ class SyncLoopTest(unittest.TestCase):
                 return True
 
         seen = []
-        with mock.patch.object(backends.TakenOverBackend, "sync", lambda _self, name, **_kw: seen.append(name) or {}):
+        with mock.patch.object(backends.AttachedBackend, "sync", lambda _self, name, **_kw: seen.append(name) or {}):
             backends.sync_loop(OneShot(), lambda: "S1", interval=0)
         self.assertEqual(seen, ["003#bg-aaaa1111"])
         self.assertTrue(backends.beat_path("S1").is_file())

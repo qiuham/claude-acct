@@ -1,14 +1,14 @@
-"""接管会话的“请确认”转到总控面板上点（Claude Code 官方的 PermissionRequest 钩子）。
+"""挂上会话的“请确认”转到总控面板上点（Claude Code 官方的 PermissionRequest 钩子）。
 
 流程：
 
 1. 各号 settings.json 里配一个 PermissionRequest 钩子：`cca sideagent permission-hook`。
 2. 会话要弹确认框时，Claude Code 先跑这个钩子，把会话编号、工具名、参数从标准输入给它。
-3. 钩子查这个会话有没有被总控接管（~/.cca/sideagents/<名字>/state.json 里 kind=attached、
+3. 钩子查这个会话有没有被总控挂上（~/.cca/sideagents/<名字>/state.json 里 kind=attached、
    session_id 对得上，而且至少一个主会话的名单 ~/.cca/sessions/*.json 里有它、主人还在）：
-   - 没被接管：立刻无输出退出，Claude Code 照常弹原生确认框，和没装钩子一样。
-   - 被接管：写一条待确认请求（~/.cca/sideagents/perm/<实例名>/<请求编号>.req.json），
-     接管它的每个主会话的面板都会显示（M 对 N），谁先答算谁的；
+   - 没被挂上：立刻无输出退出，Claude Code 照常弹原生确认框，和没装钩子一样。
+   - 被挂上：写一条待确认请求（~/.cca/sideagents/perm/<实例名>/<请求编号>.req.json），
+     挂上它的每个主会话的面板都会显示（M 对 N），谁先答算谁的；
      然后等结果文件（同目录 <请求编号>.res.json）。面板上按“允许/拒绝”就是写这个结果文件
      （`cca sideagent permission-answer <实例名> allow|deny`）。
 4. 拿到结果就按官方格式输出 allow/deny；等满 WAIT_SECONDS（默认 600 秒）没人点，回 deny 并写明原因。
@@ -38,11 +38,11 @@ INPUT_LIMIT = 4000           # 请求文件里参数最多留多少字
 
 
 def _taken_over_name(session_id: str) -> str:
-    """这个会话被接管了就返回实例名（例：003#bg-36709e4a），没有就空串。
+    """这个会话被挂上了就返回实例名（例：003#bg-36709e4a），没有就空串。
 
-    接管的可以有好几个主人：只要有一个还在，就算被接管（规则 7：发给所有活着的主人，谁先答算谁的）。
+    挂上的可以有好几个主人：只要有一个还在，就算被挂上（规则 7：发给所有活着的主人，谁先答算谁的）。
     """
-    from cca.session import roster, sideagent  # noqa: PLC0415 - 没被接管时尽量少导入
+    from cca.session import roster, sideagent  # noqa: PLC0415 - 没被挂上时尽量少导入
 
     root = sideagent.SIDEAGENT_DIR
     if not session_id or not root.is_dir():

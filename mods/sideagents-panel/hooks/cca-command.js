@@ -1,18 +1,18 @@
 // /cca：cca 的几个面板都收在这一个斜杠命令下面。
 //   /cca            小菜单，回车进去
-//   /cca takeover [--all] [第一句话]   接管挑选框；后面跟的话在接上后作为第一句话发给它
+//   /cca attach [--all] [第一句话]   挂上挑选框；后面跟的话在接上后作为第一句话发给它
 // 换号、看门狗不在面板里做，在终端用 cca handoff、cca watchdog。
-// 每个子命令的面板自己管自己（takeover-picker.js），这里只分发。
+// 每个子命令的面板自己管自己（attach-picker.js），这里只分发。
 
 import { closeList, openList } from './list-pane.js'
-import { openPicker } from './takeover-picker.js'
+import { openPicker } from './attach-picker.js'
 
 export const COMMAND = 'cca'
 export const MENU_ID = 'cca-menu'
 
 // 子命令（菜单里的顺序）：名字、中文名、一句说明
 export const SUBCOMMANDS = [
-  { name: 'takeover', title: '接管', note: '把本机别的会话挂到这里的 sideagent 面板上' },
+  { name: 'attach', title: '挂上', note: '把本机别的会话挂到这里的 sideagent 面板上' },
   { name: 'handoff', title: '换号', note: '这一轮结束后把本会话换到别的号（不写号就按额度挑）' },
   { name: 'stay', title: '留下', note: '本会话留在这个号，额度到提醒点也不搬（撞墙照搬）' },
 ]
@@ -39,8 +39,8 @@ async function runCcaHandoff($, name, args) {
 // 打开某个子命令的面板。用 switch 写死，不按名字动态调用（插件引擎要求 $ 只能直接传给认得的函数）
 async function openSub($, name, args) {
   switch (name) {
-    case 'takeover': {
-      // 后面跟的话是接管后发给它的第一句话
+    case 'attach': {
+      // 后面跟的话是挂上后发给它的第一句话
       await openPicker($, { firstWords: args.trim() })
       return true
     }

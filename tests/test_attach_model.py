@@ -1,4 +1,4 @@
-"""接管会话的模型：打断、出错时的合成消息（<synthetic>）不算真用的模型。"""
+"""挂上会话的模型：打断、出错时的合成消息（<synthetic>）不算真用的模型。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import isolate  # noqa: E402,F401 - 先于 cca 导入：HOME 指到临时目录，测试不碰真实 ~/.claude-accounts
 
-from cca.session import takeover  # noqa: E402
+from cca.session import attach  # noqa: E402
 
 
 def assistant(model: str) -> str:
@@ -23,11 +23,11 @@ def assistant(model: str) -> str:
 
 class ScanModelTest(unittest.TestCase):
     def test_synthetic_keeps_real_model(self):
-        _events, _notes, acc = takeover._scan([assistant("deepseek-flash"), assistant("<synthetic>")], {})  # noqa: SLF001
+        _events, _notes, acc = attach._scan([assistant("deepseek-flash"), assistant("<synthetic>")], {})  # noqa: SLF001
         self.assertEqual(acc["model"], "deepseek-flash")
 
     def test_stored_synthetic_is_dropped(self):
-        _events, _notes, acc = takeover._scan([], {"model": "<synthetic>"})  # noqa: SLF001
+        _events, _notes, acc = attach._scan([], {"model": "<synthetic>"})  # noqa: SLF001
         self.assertEqual(acc["model"], "")
 
 
@@ -49,9 +49,9 @@ class CardTest(unittest.TestCase):
                 {"type": "assistant", "message": {"model": "m", "content": [{"type": "text", "text": "镜像拉不下来"}]}},
             ]
             (projects / "abc12345-full.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
-            with mock.patch.object(takeover, "PROJECTS_DIR", Path(tmp) / "projects"):
-                text = takeover.card("abc12345-full", account="002", title="ham-b3", state="idle")
-        self.assertIn("接管了 002/abc12345「ham-b3」（idle）", text)
+            with mock.patch.object(attach, "PROJECTS_DIR", Path(tmp) / "projects"):
+                text = attach.card("abc12345-full", account="002", title="ham-b3", state="idle")
+        self.assertIn("挂上了 002/abc12345「ham-b3」（idle）", text)
         self.assertIn("回顾：在加节点，卡在 Cilium 镜像", text)
         self.assertIn("  问：把 152.152 加进集群", text)
         self.assertIn("  答：镜像拉不下来", text)
@@ -65,10 +65,10 @@ class StoppedHiddenTest(unittest.TestCase):
                 {"account": "ds", "id": "c", "session_id": "c-full", "name": "z", "kind": "background", "cwd": "", "state": "failed", "running": False}]
         # 名单和 sideagent 目录换到空的临时目录：不读真实的 ~/.cca
         with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(takeover.sideagent, "SIDEAGENT_DIR", Path(tmp) / "sideagents"), \
-                mock.patch.object(takeover, "candidates", return_value=rows), \
-                mock.patch.object(takeover, "last_line", return_value=""), mock.patch.object(takeover, "recap", return_value=""):
-            got = takeover.picker_rows(include_running=True, owner_session="me")
+                mock.patch.object(attach.sideagent, "SIDEAGENT_DIR", Path(tmp) / "sideagents"), \
+                mock.patch.object(attach, "candidates", return_value=rows), \
+                mock.patch.object(attach, "last_line", return_value=""), mock.patch.object(attach, "recap", return_value=""):
+            got = attach.picker_rows(include_running=True, owner_session="me")
         self.assertEqual([row["id"] for row in got], ["b"])
 
 
@@ -83,13 +83,13 @@ class PickerOnePerSessionTest(unittest.TestCase):
                 # 派出的 sideagent 自己的会话：不列
                 {"account": "ds", "id": "c", "session_id": "c-full", "name": "派出的", "kind": "interactive", "cwd": "", "state": "busy", "running": True}]
         with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(takeover.sideagent, "SIDEAGENT_DIR", Path(tmp) / "sideagents"), \
-                mock.patch.object(takeover, "candidates", return_value=rows), \
-                mock.patch.object(takeover, "_process_account", return_value=False), \
-                mock.patch.object(takeover, "_spawned_sessions", return_value={"c-full"}), \
-                mock.patch.object(takeover, "last_line", return_value=""), \
-                mock.patch.object(takeover, "last_ask", side_effect=lambda sid: "交代给" + sid):
-            got = takeover.picker_rows(include_running=True, owner_session="me")
+                mock.patch.object(attach.sideagent, "SIDEAGENT_DIR", Path(tmp) / "sideagents"), \
+                mock.patch.object(attach, "candidates", return_value=rows), \
+                mock.patch.object(attach, "_process_account", return_value=False), \
+                mock.patch.object(attach, "_spawned_sessions", return_value={"c-full"}), \
+                mock.patch.object(attach, "last_line", return_value=""), \
+                mock.patch.object(attach, "last_ask", side_effect=lambda sid: "交代给" + sid):
+            got = attach.picker_rows(include_running=True, owner_session="me")
         self.assertEqual(sorted((row["id"], row["account"]) for row in got), [("a", "005"), ("b", "ds")])
         self.assertEqual({row["id"]: row["ask"] for row in got}, {"a": "交代给a-full", "b": "交代给b-full"})
 
@@ -97,5 +97,5 @@ class PickerOnePerSessionTest(unittest.TestCase):
         from unittest import mock
         rows = [{"account": "ds", "id": "a", "session_id": "a-full", "state": "busy"},
                 {"account": "005", "id": "a", "session_id": "a-full", "state": "busy"}]
-        with mock.patch.object(takeover, "_process_account", side_effect=lambda row: row["account"] == "005"):
-            self.assertEqual([row["account"] for row in takeover.one_per_session(rows)], ["005"])
+        with mock.patch.object(attach, "_process_account", side_effect=lambda row: row["account"] == "005"):
+            self.assertEqual([row["account"] for row in attach.one_per_session(rows)], ["005"])

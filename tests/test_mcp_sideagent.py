@@ -68,7 +68,7 @@ class HandleTest(unittest.TestCase):
         out = mcp_sideagent.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = [tool["name"] for tool in out["result"]["tools"]]
         self.assertEqual(names, ["sideagent_send", "sideagent_result", "sideagent_interrupt",
-                                 "sideagent_status", "sideagent_takeover", "sideagent_release",
+                                 "sideagent_status", "sideagent_attach", "sideagent_detach",
                                  "sideagent_accounts", "sideagent_stop"])
 
     def test_unknown_method(self):

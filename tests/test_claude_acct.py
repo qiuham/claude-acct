@@ -125,10 +125,10 @@ for call in calls:
 
 PUSH_JOB_PROBE = """
 import sys
-from cca.session import takeover
+from cca.session import attach
 from cca.session.push import push_session_once, wait_job_id
 
-takeover.deliver_after_resume = lambda account, session, text, **kw: calls.append(["deliver", text]) or ""
+attach.deliver_after_resume = lambda account, session, text, **kw: calls.append(["deliver", text]) or ""
 moving = sys.argv[2] == "moving"
 full = sys.argv[3]
 calls = []

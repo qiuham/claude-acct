@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
 
 class ProbeTzTest(unittest.TestCase):
-    """起会话的路径（handoff / takeover）用 probe_tz：跟出口，CCA_TZ 可覆盖。"""
+    """起会话的路径（handoff / attach）用 probe_tz：跟出口，CCA_TZ 可覆盖。"""
 
     def probe(self, *, cca_tz: str | None, timezone: str, shell_tz: str = "America/Los_Angeles"):
         environ = {k: v for k, v in os.environ.items() if k != "CCA_TZ"}
@@ -120,7 +120,7 @@ class ProbeCacheTest(unittest.TestCase):
 
 
 class ProbeSkipTest(unittest.TestCase):
-    """CCA_TZ 写死时不要去探测出口：handoff/takeover 会快 3 秒，也不依赖网络。"""
+    """CCA_TZ 写死时不要去探测出口：handoff/attach 会快 3 秒，也不依赖网络。"""
 
     def test_fixed_tz_skips_probe(self):
         with mock.patch.dict(os.environ, {"CCA_TZ": "America/Los_Angeles"}, clear=False), \

@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import isolate  # noqa: E402,F401 - 先于 cca 导入：HOME 指到临时目录，测试不碰真实 ~/.claude-accounts
 
 from cca.account import lifecycle  # noqa: E402
-from cca.session import push, takeover, wake, watchdog  # noqa: E402
+from cca.session import attach, push, wake, watchdog  # noqa: E402
 
 SID = "12e1c36e-24a8-4bea-a9be-6a1ff93025e5"
 NAME = "我的 会话"
@@ -33,7 +33,7 @@ def rec(kind, **fields):
 
 
 class NameTestCase(unittest.TestCase):
-    """临时号目录 + 一条对话记录；takeover 的登记表和投递都换成假的。"""
+    """临时号目录 + 一条对话记录；attach 的登记表和投递都换成假的。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -43,7 +43,7 @@ class NameTestCase(unittest.TestCase):
         self.path = self.cfg / "projects" / "proj" / f"{SID}.jsonl"
         self.path.parent.mkdir(parents=True)
         self.now = 1000.0
-        self.clock = mock.Mock(time=self.tick, sleep=self.advance)   # takeover 里的 time：假时钟，sleep 只拨钟
+        self.clock = mock.Mock(time=self.tick, sleep=self.advance)   # attach 里的 time：假时钟，sleep 只拨钟
         self.delivered = []
         self.deliver_errors = []          # 依次作为每次 deliver 的返回；用完返回成功
         self.registry = {"messagingSocketPath": "/run/x.sock", "status": "idle"}
@@ -54,10 +54,10 @@ class NameTestCase(unittest.TestCase):
                       mock.patch.object(push.atexit, "register"),
                       mock.patch.object(push, "profile_dir", return_value=self.cfg),
                       mock.patch.object(watchdog, "profile_dir", return_value=self.cfg),
-                      mock.patch.object(takeover, "profile_dir", return_value=self.cfg),
-                      mock.patch.object(takeover, "registry_entry", side_effect=lambda *_: dict(self.registry)),
-                      mock.patch.object(takeover, "deliver", side_effect=self.fake_deliver),
-                      mock.patch.object(takeover, "time", new=self.clock),
+                      mock.patch.object(attach, "profile_dir", return_value=self.cfg),
+                      mock.patch.object(attach, "registry_entry", side_effect=lambda *_: dict(self.registry)),
+                      mock.patch.object(attach, "deliver", side_effect=self.fake_deliver),
+                      mock.patch.object(attach, "time", new=self.clock),
                       mock.patch.object(lifecycle, "say"),
                       mock.patch.object(lifecycle, "warn", side_effect=self.warnings.append)):
             patch.start()
@@ -135,28 +135,28 @@ class SessionNameTest(NameTestCase):
 class ResumeLaunchTest(NameTestCase):
     def test_named_starts_with_rename_and_defers_prompt(self):
         self.named()
-        self.assertEqual(takeover.resume_launch("001", SID, "接着做"), ([f"/rename {NAME}"], "接着做"))
-        self.assertEqual(takeover.resume_launch("001", SID), ([f"/rename {NAME}"], ""))
+        self.assertEqual(attach.resume_launch("001", SID, "接着做"), ([f"/rename {NAME}"], "接着做"))
+        self.assertEqual(attach.resume_launch("001", SID), ([f"/rename {NAME}"], ""))
 
     def test_unnamed_is_unchanged(self):
         self.unnamed()
-        self.assertEqual(takeover.resume_launch("001", SID, "接着做"), (["接着做"], ""))
-        self.assertEqual(takeover.resume_launch("001", SID), ([], ""))
+        self.assertEqual(attach.resume_launch("001", SID, "接着做"), (["接着做"], ""))
+        self.assertEqual(attach.resume_launch("001", SID), ([], ""))
 
 
 class DeliverAfterResumeTest(NameTestCase):
     def test_delivers_once_registered(self):
-        self.assertEqual(takeover.deliver_after_resume("001", SID, "话"), "")
+        self.assertEqual(attach.deliver_after_resume("001", SID, "话"), "")
         self.assert_delivered("话")
 
     def test_empty_text_does_nothing(self):
         self.registry = {}
-        self.assertEqual(takeover.deliver_after_resume("001", SID, ""), "")
+        self.assertEqual(attach.deliver_after_resume("001", SID, ""), "")
         self.assertEqual(self.delivered, [])
 
     def test_waits_for_socket_then_gives_up_with_reason(self):
         self.registry = {"status": "idle"}
-        error = takeover.deliver_after_resume("001", SID, "话", wait=3)
+        error = attach.deliver_after_resume("001", SID, "话", wait=3)
         self.assertIn("还没出现", error)
         self.assertEqual(self.delivered, [])
 
@@ -171,25 +171,25 @@ class DeliverAfterResumeTest(NameTestCase):
                 self.registry = {"messagingSocketPath": "/run/x.sock", "status": "idle"}
 
         self.clock.sleep = advance
-        self.assertEqual(takeover.deliver_after_resume("001", SID, "话", wait=30), "")
+        self.assertEqual(attach.deliver_after_resume("001", SID, "话", wait=30), "")
         self.assert_delivered("话")
 
     def test_retries_until_deadline_not_a_fixed_count(self):
         # 套接字登记出来了但还连不上（刚起来、在处理 /rename）：不止试 3 次，直到期限
         self.deliver_errors = [f"发不出去：{n}" for n in range(10)]
-        self.assertEqual(takeover.deliver_after_resume("001", SID, "话"), "")
+        self.assertEqual(attach.deliver_after_resume("001", SID, "话"), "")
         self.assertEqual(len(self.delivered), 11)
 
     def test_gives_up_at_deadline_and_reports_last_error(self):
         self.deliver_errors = [f"发不出去：{n}" for n in range(1000)]
-        error = takeover.deliver_after_resume("001", SID, "话", wait=5)
+        error = attach.deliver_after_resume("001", SID, "话", wait=5)
         self.assertTrue(error.startswith("发不出去："))
         self.assertGreater(len(self.delivered), 3)
         self.assertLess(self.now, 1000 + 5 + 2)
 
     def test_zero_wait_tries_once(self):
         self.deliver_errors = ["发不出去：1"]
-        self.assertEqual(takeover.deliver_after_resume("001", SID, "话", wait=0), "发不出去：1")
+        self.assertEqual(attach.deliver_after_resume("001", SID, "话", wait=0), "发不出去：1")
         self.assertEqual(len(self.delivered), 1)
 
 
@@ -327,7 +327,7 @@ class WakeTest(NameTestCase):
         self.assertIn("发不出去：x", error)
 
     def test_round_budget_caps_the_wait(self):
-        from cca.session.takeover import REGISTER_WAIT  # noqa: PLC0415
+        from cca.session.attach import REGISTER_WAIT  # noqa: PLC0415
 
         now = 5000.0
         with mock.patch.object(wake.time, "time", return_value=now):
@@ -337,15 +337,15 @@ class WakeTest(NameTestCase):
         self.assertFalse(hasattr(wake, "REGISTER_WAIT"))
 
 
-class TakeoverWakeTest(NameTestCase):
+class AttachWakeTest(NameTestCase):
     def wake(self):
         row = {"session_id": SID, "kind": "background", "account": "001", "cwd": ""}
         done = mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch.object(takeover, "_claude", return_value="claude"), \
+        with mock.patch.object(attach, "_claude", return_value="claude"), \
              mock.patch("cca.env.session_env", return_value={}), \
              mock.patch("cca.session.transcript.target_needs_strip", return_value=False), \
-             mock.patch.object(takeover.subprocess, "run", return_value=done) as run:
-            error = takeover._wake(row)  # noqa: SLF001
+             mock.patch.object(attach.subprocess, "run", return_value=done) as run:
+            error = attach._wake(row)  # noqa: SLF001
         return error, run.call_args.args[0]
 
     def test_named_only_swaps_the_start_prompt(self):
@@ -463,23 +463,23 @@ class StaleRegistrationTest(unittest.TestCase):
             (folder / "2.json").write_text(json.dumps({"sessionId": full, "pid": os.getpid()}), encoding="utf-8")
             (folder / "3.json").write_text(json.dumps({"sessionId": "other", "pid": 999999999}), encoding="utf-8")
             (folder / "4.json").write_text("{bad", encoding="utf-8")
-            with mock.patch.object(takeover, "profile_dir", side_effect=lambda n: Path(tmp) / n):
-                removed = takeover.clear_stale_registrations("001", full)
+            with mock.patch.object(attach, "profile_dir", side_effect=lambda n: Path(tmp) / n):
+                removed = attach.clear_stale_registrations("001", full)
             self.assertEqual(removed, ["1.json"])
             self.assertEqual(sorted(p.name for p in folder.iterdir()), ["2.json", "3.json", "4.json"])
 
     def test_every_resume_path_clears_stale_registrations_first(self):
-        """resume-bg / 发话唤醒（takeover._wake）和 cca wake（wake._wake）也要先清，不只换号。"""
+        """resume-bg / 发话唤醒（attach._wake）和 cca wake（wake._wake）也要先清，不只换号。"""
         seen = []
         row = {"session_id": SID, "kind": "background", "account": "001", "cwd": ""}
         done = mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch.object(takeover, "clear_stale_registrations",
+        with mock.patch.object(attach, "clear_stale_registrations",
                                side_effect=lambda a, s: seen.append((a, s)) or []), \
-             mock.patch.object(takeover, "_claude", return_value="claude"), \
-             mock.patch.object(takeover, "resume_launch", return_value=([], "")), \
-             mock.patch.object(takeover, "registry_entry", return_value={"pid": 1}), \
+             mock.patch.object(attach, "_claude", return_value="claude"), \
+             mock.patch.object(attach, "resume_launch", return_value=([], "")), \
+             mock.patch.object(attach, "registry_entry", return_value={"pid": 1}), \
              mock.patch("cca.env.session_env", return_value={}), \
              mock.patch("cca.session.transcript.target_needs_strip", return_value=False), \
-             mock.patch.object(takeover.subprocess, "run", return_value=done):
-            takeover._wake(row)  # noqa: SLF001
+             mock.patch.object(attach.subprocess, "run", return_value=done):
+            attach._wake(row)  # noqa: SLF001
         self.assertEqual(seen, [("001", SID)])

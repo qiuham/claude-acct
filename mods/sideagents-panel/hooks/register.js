@@ -1,6 +1,6 @@
 import { displayWidth, plainEvent } from './text-width.js'
 export { displayWidth }
-import { onTakeoverCall } from './takeover-picker.js'
+import { onAttachCall } from './attach-picker.js'
 import { withPeerHint } from './peer-hint.js'
 import { QUOTA_FIRST_MS, QUOTA_POLL_MS, parseQuota, withHint } from './quota-hint.js'
 import { COMMAND as CCA_COMMAND, ccaCompletions, runCca } from './cca-command.js'
@@ -85,7 +85,7 @@ const view = { think: true, detail: true }
 
 // 已经通知过的sideagent，别重复记
 // 会话开起来的时间：比这更早结束的sideagent不叫醒主代理
-// 本会话有没有接管原生后台会话（sideagent_takeover）：有才每次刷新先同步一次
+// 本会话有没有挂上原生后台会话（sideagent_attach）：有才每次刷新先同步一次
 let hasExternal = false
 // 额度快满的提醒（quota-hint.js）：最近一次 cca 给的提醒，和已经附给模型的
 let quotaHint = null
@@ -172,7 +172,7 @@ function usedOf(state) {
 
 // 进程是不是改代码前起的：没有 code_version，或者和磁盘上的版本对不上
 function isStale(state) {
-  // 接管的原生会话进程不是我们起的，没有“旧代码要重启”这回事
+  // 挂上的原生会话进程不是我们起的，没有“旧代码要重启”这回事
   if (isAttached(state)) return false
   const mine = String(state.code_version || '')
   if (!mine) return true
@@ -518,7 +518,7 @@ async function refreshLatest($) {
   return changed
 }
 
-// 接管的（kind=attached）：会话不是我们起的，可以同时挂在好几个主会话上
+// 挂上的（kind=attached）：会话不是我们起的，可以同时挂在好几个主会话上
 export function isAttached(state) {
   return String(state?.kind || '') === 'attached'
 }
@@ -595,7 +595,7 @@ async function collect($) {
     const folder = dir + '/' + name
     const state = await readJson($, folder + '/state.json')
     if (!state) continue
-    // 接管的（attached）进程不归我们管，没有我们的套接字；派出的写了 finished_at、或者没有 run/sock，就是没在跑
+    // 挂上的（attached）进程不归我们管，没有我们的套接字；派出的写了 finished_at、或者没有 run/sock，就是没在跑
     // （进程被硬杀时来不及删 run/，留下的旧套接字不算在跑）
     const attached = isAttached(state) || note?.kind === 'attached'
     if (!attached && (state.finished_at || !(await $.fs.exists(folder + '/run/sock')))) {
@@ -1411,19 +1411,19 @@ export function permissionBox($, el, name, permission) {
   })
 }
 
-// 详情页顶上的那一块：有“请确认”先画它；接管的会话画“拿掉”按钮；别的不画
+// 详情页顶上的那一块：有“请确认”先画它；挂上的会话画“拿掉”按钮；别的不画
 function paneExtra($, el, { name, entry, paneId }) {
   if (entry.permission) return permissionBox($, el, name, entry.permission)
-  if (entry.attached) return releaseBox($, el, name, paneId)
+  if (entry.attached) return detachBox($, el, name, paneId)
   return null
 }
 
-// 接管的会话：详情页顶上一个“拿掉”按钮，只从本会话的面板拿掉，会话本身不停（热键 x）
-export function releaseBox($, el, name, paneId) {
+// 挂上的会话：详情页顶上一个“拿掉”按钮，只从本会话的面板拿掉，会话本身不停（热键 x）
+export function detachBox($, el, name, paneId) {
   const { Box, Text, Button } = el
   const press = async () => {
     try {
-      await $.process.run(['cca', 'sideagent', 'release', name, mySession], { timeoutMs: 10000 })
+      await $.process.run(['cca', 'sideagent', 'detach', name, mySession], { timeoutMs: 10000 })
     } catch {
       // 拿不掉（已经被拿掉了）：下一次刷新会更新
     }
@@ -1434,7 +1434,7 @@ export function releaseBox($, el, name, paneId) {
   return Box({
     flexDirection: 'row',
     children: [
-      Button({ key: 'release-' + name, label: '从面板拿掉 (x)', hotkey: 'x', onPress: press,
+      Button({ key: 'detach-' + name, label: '从面板拿掉 (x)', hotkey: 'x', onPress: press,
         children: [Text({ children: ['[ 从面板拿掉 x ]'], dimColor: true })] }),
       Text({ children: ['  会话本身不停'], dimColor: true }),
     ],
@@ -1447,7 +1447,7 @@ const answered = new Set()
 const toasted = new Set()
 
 // 状态的样子：图标、颜色、词
-// 接管的原生后台会话在等人确认
+// 挂上的原生后台会话在等人确认
 const BLOCKED_LOOK = { mark: '!', color: 'warning', word: '等确认' }
 
 // 卡在哪：最后一个还没有结果的工具调用；找不到就写登记表里的原因
@@ -1512,7 +1512,7 @@ async function refresh($) {
     mySession = nowSession
   }
   if (hasExternal && mySession && !(await syncBeating($))) {
-    // 进程不归我们管的（接管的原生会话）平时由本会话的 MCP 服务在后台同步；
+    // 进程不归我们管的（挂上的原生会话）平时由本会话的 MCP 服务在后台同步；
     // MCP 服务不在（没装、挂了）才自己起一次 cca 兜底（插件读文件只能整份读，要它按位置增量读）
     try {
       await $.process.run(['cca', 'sideagent', 'bg-sync', mySession], { timeoutMs: 15000 })
@@ -2497,12 +2497,12 @@ export function register(on) {
   on('session.start', async ($, e, next) => {
     // sideagent进程自己也会加载这个插件；它不是界面，不用启动面板和通知
     if (await $.env.get('CCA_SIDEAGENT')) return next(e)
-    // /cca：接管面板收在这一个命令下（名字被占用时不影响面板）
+    // /cca：挂上面板收在这一个命令下（名字被占用时不影响面板）
     try {
       await $.command.register({
         name: CCA_COMMAND,
-        description: 'cca：takeover 接管会话、handoff 本会话换号、stay 留在本号；不带参数弹菜单',
-        argumentHint: 'takeover [第一句话] | handoff [号] | stay',
+        description: 'cca：attach 挂上会话、handoff 本会话换号、stay 留在本号；不带参数弹菜单',
+        argumentHint: 'attach [第一句话] | handoff [号] | stay',
         immediate: true,
       })
     } catch {
@@ -2538,7 +2538,7 @@ export function register(on) {
 
   on('ui.scroll', async ($, e, next) => {
     const id = String(e.requestId || '')
-    // 接管挑选框：↑↓ 在各行之间挪，不滚动（和原生选择列表一样）
+    // 挂上挑选框：↑↓ 在各行之间挪，不滚动（和原生选择列表一样）
     // cca 的列表面板：↑↓ 在各行之间挪，不滚动（和原生选择列表一样）
     if (hasList(id) && e.origin?.kind === 'person' && !e.pointer && Math.abs(Number(e.by || 0)) === 1) {
       await onListArrow($, id, Number(e.by))
@@ -2581,9 +2581,9 @@ export function register(on) {
     return done
   })
 
-  // /cca（菜单、接管）的列表面板
+  // /cca（菜单、挂上）的列表面板
   on('command.run', { command: CCA_COMMAND }, ($, e) => runCca($, e))
-  // 敲 /cca t… 时补全列表里给出 takeover
+  // 敲 /cca a… 时补全列表里给出 attach
   on('prompt.autocomplete', async ($, e, next) => {
     const mine = ccaCompletions(e)
     if (!mine.length) return next(e)
@@ -2600,9 +2600,9 @@ export function register(on) {
   on('ui.message', ($, e, next) => onListMessage($, e, (passed) => onBandMessage($, passed, next)))
 
   // 子代理派 sideagent：记下派活的子代理；它发回来的消息转给那个子代理，不进主对话
-  // 模型调 sideagent_takeover 却没给会话：打开挑选框；子代理派 sideagent：记下派活的子代理
+  // 模型调 sideagent_attach 却没给会话：打开挑选框；子代理派 sideagent：记下派活的子代理
   // 原生 SendMessage 发不到：提醒模型对方多半在别的号上，改用 sideagent_send {session}（见 peer-hint.js）
   on('tool.call', async ($, e, next) => withHint(withPeerHint(
-    await onTakeoverCall($, e, (call) => onSideagentCall($, call, next)), e), quotaHint, quotaHintsGiven, e))
+    await onAttachCall($, e, (call) => onSideagentCall($, call, next)), e), quotaHint, quotaHintsGiven, e))
   on('session.receive', onReceive)
 }

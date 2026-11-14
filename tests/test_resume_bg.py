@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import isolate  # noqa: F401 - 先于 cca 导入：HOME 指到临时目录，测试不碰真实 ~/.claude-accounts
 
-from cca.session import push, takeover
+from cca.session import attach, push
 
 RUNNING = "aaaa1111-0000-0000-0000-000000000000"
 PARKED = "bbbb2222-0000-0000-0000-000000000000"
@@ -40,15 +40,15 @@ class ResumeBgTest(unittest.TestCase):
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
     def run_resume(self, *, resume_error=None, registered=False):
-        with mock.patch.object(takeover, "registry_entry", return_value={"pid": 1} if registered else {}), \
-                mock.patch.object(takeover, "resume_quietly",
+        with mock.patch.object(attach, "registry_entry", return_value={"pid": 1} if registered else {}), \
+                mock.patch.object(attach, "resume_quietly",
                                   side_effect=lambda account, sid, cwd="": (resume_error or {}).get(sid, "")) as wake, \
-                mock.patch.object(takeover, "deliver_after_resume", return_value="") as deliver:
+                mock.patch.object(attach, "deliver_after_resume", return_value="") as deliver:
             code = push.cmd_resume_bg([])
         return code, wake, deliver
 
     def test_dry_run_lists_without_touching(self):
-        with mock.patch.object(takeover, "resume_quietly") as wake:
+        with mock.patch.object(attach, "resume_quietly") as wake:
             self.assertEqual(push.cmd_resume_bg(["--dry-run"]), 0)
         wake.assert_not_called()
         self.assertEqual(set(self.manifest()), {RUNNING, PARKED})

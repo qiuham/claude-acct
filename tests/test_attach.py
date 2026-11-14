@@ -1,4 +1,4 @@
-"""接管原生后台会话：对话记录翻译、增量同步、发话、总控退出不停。夹具是实测抓下来的对话记录。"""
+"""挂上原生后台会话：对话记录翻译、增量同步、发话、总控退出不停。夹具是实测抓下来的对话记录。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import isolate  # noqa: E402,F401 - 先于 cca 导入：HOME 指到临时目录，测试不碰真实 ~/.claude-accounts
 
 from cca import mcp_sideagent  # noqa: E402
-from cca.session import inbox, roster, sideagent, takeover  # noqa: E402
+from cca.session import attach, inbox, roster, sideagent  # noqa: E402
 
 sys.path.insert(0, str(REPO / "tests"))
 from sidehelp import write_roster  # noqa: E402
@@ -36,7 +36,7 @@ class EventsTest(unittest.TestCase):
         kinds = []
         notes = []
         for item in _items("bg-transcript.jsonl"):
-            found, noted = takeover.events_of(item)
+            found, noted = attach.events_of(item)
             kinds += [event["kind"] for event in found]
             notes += noted
         # 实测：派活 → Bash → 结果 → 说 OK；签名占位的空思考不算
@@ -46,7 +46,7 @@ class EventsTest(unittest.TestCase):
 
     def test_peer_message_becomes_task_with_sender(self):
         tasks = [event for item in _items("bg-transcript-peer.jsonl")
-                 for event in takeover.events_of(item)[0] if event["kind"] == "task"]
+                 for event in attach.events_of(item)[0] if event["kind"] == "task"]
         peer = [task for task in tasks if task.get("from")]
         self.assertEqual(peer[0]["from"], "ham-76")
         self.assertIn("BG-GOT-IT", peer[0]["text"])
@@ -54,7 +54,7 @@ class EventsTest(unittest.TestCase):
     def test_sidechain_is_skipped(self):
         item = {"type": "assistant", "isSidechain": True,
                 "message": {"content": [{"type": "text", "text": "子代理说的"}]}}
-        self.assertEqual(takeover.events_of(item), ([], []))
+        self.assertEqual(attach.events_of(item), ([], []))
 
 
 class SyncTest(unittest.TestCase):
@@ -68,11 +68,11 @@ class SyncTest(unittest.TestCase):
         self.transcript = root / "t.jsonl"
         self.lines = (FIXTURES / "bg-transcript.jsonl").read_text(encoding="utf-8").splitlines()
         self.patches = [mock.patch.object(sideagent, "SIDEAGENT_DIR", self.side),
-                        mock.patch.object(takeover, "profile_dir", return_value=self.account_dir)]
+                        mock.patch.object(attach, "profile_dir", return_value=self.account_dir)]
         for patch in self.patches:
             patch.start()
         self.name = "003#bg-36709e4a"
-        # 格式改了：kind=attached，谁接管的记在主会话名单 sessions/owner.json 里
+        # 格式改了：kind=attached，谁挂上的记在主会话名单 sessions/owner.json 里
         sideagent._write_state(self.name, {  # noqa: SLF001
             "kind": "attached", "account": "003", "session_id": "s-1", "transcript": str(self.transcript),
             "offset": 0, "busy": False, "started": 0})
@@ -95,13 +95,13 @@ class SyncTest(unittest.TestCase):
         # 半行没写完：只读到最后一个完整行
         self.transcript.write_text("\n".join(self.lines[:half]) + "\n" + self.lines[half][:20], encoding="utf-8")
         self._registry("busy")
-        state = takeover.sync_one(self.name)
+        state = attach.sync_one(self.name)
         self.assertTrue(state["busy"])
         first_offset = state["offset"]
         self.assertLess(first_offset, self.transcript.stat().st_size)
         self.transcript.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
         self._registry("idle")
-        state = takeover.sync_one(self.name)
+        state = attach.sync_one(self.name)
         self.assertFalse(state["busy"])
         self.assertEqual(state["model"], "claude-haiku-5-5")
         self.assertGreater(state["token_count"], 0)
@@ -111,14 +111,14 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(events[-1]["text"], "OK")
         self.assertIn("RESULT OK", sideagent._progress_path(self.name).read_text())  # noqa: SLF001
         # 没有新内容、状态没变：再同步一次不重复记
-        takeover.sync_one(self.name)
+        attach.sync_one(self.name)
         events = sideagent._events_path(self.name).read_text().splitlines()  # noqa: SLF001
         self.assertEqual(sum('"result"' in line for line in events), 1)
 
     def test_waiting_is_marked(self):
         self.transcript.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
         self._registry("waiting", "permission prompt")
-        state = takeover.sync_one(self.name)
+        state = attach.sync_one(self.name)
         self.assertTrue(state["busy"])
         self.assertEqual((state["status"], state["waiting_for"]), ("waiting", "permission prompt"))
 
@@ -132,16 +132,16 @@ class SyncTest(unittest.TestCase):
                  "messagingSocketPath": "/nonexistent.sock"}
         (other / "sessions" / f"{os.getpid()}.json").write_text(json.dumps(entry), encoding="utf-8")
         dirs = {"003": self.account_dir, "b005": other}
-        with mock.patch.object(takeover, "profile_dir", side_effect=lambda name: dirs[name]), \
-             mock.patch.object(takeover, "discover_profiles", return_value=["003", "b005"]):
-            state = takeover.sync_one(self.name)
-            self.assertEqual(takeover.registry_entry("003", "s-1")["account"], "b005")
+        with mock.patch.object(attach, "profile_dir", side_effect=lambda name: dirs[name]), \
+             mock.patch.object(attach, "discover_profiles", return_value=["003", "b005"]):
+            state = attach.sync_one(self.name)
+            self.assertEqual(attach.registry_entry("003", "s-1")["account"], "b005")
         self.assertEqual((state["account"], state["label"], state["status"]), ("b005", "ham-fa", "idle"))
         self.assertEqual(state["pid"], os.getpid())
 
     def test_gone_session_is_ended(self):
         self.transcript.write_text("", encoding="utf-8")
-        state = takeover.sync_one(self.name)
+        state = attach.sync_one(self.name)
         self.assertEqual(state["status"], "ended")
         self.assertFalse(state["busy"])
 
@@ -155,24 +155,24 @@ class SyncTest(unittest.TestCase):
     def test_detach_removes_record_only(self):
         # 格式改了：放手只从我的名单里删；没有别的主人了才写 finished_at，文件夹留着（过期再清）
         self.transcript.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
-        takeover.sync_one(self.name)
+        attach.sync_one(self.name)
         with mock.patch.object(roster, "owner_alive", return_value=True):
-            self.assertEqual(takeover.release(self.name, "owner"), 0)
+            self.assertEqual(attach.detach(self.name, "owner"), 0)
         self.assertNotIn(self.name, roster.read("owner")["agents"])
         state = sideagent._read_state(self.name)  # noqa: SLF001
         self.assertGreater(state["finished_at"], 0)
         self.assertTrue(sideagent._events_path(self.name).exists())  # noqa: SLF001
         # 停了的不再同步
-        self.assertEqual(takeover.sync_one(self.name)["finished_at"], state["finished_at"])
-        self.assertEqual(takeover.release("ds#not-attached", "owner"), -1)
+        self.assertEqual(attach.sync_one(self.name)["finished_at"], state["finished_at"])
+        self.assertEqual(attach.detach("ds#not-attached", "owner"), -1)
 
 
 class SubagentSyncTest(SyncTest):
-    """接管会话里它自己派的子代理：读 <会话>/subagents/agent-*.jsonl，事件带上 parent。"""
+    """挂上会话里它自己派的子代理：读 <会话>/subagents/agent-*.jsonl，事件带上 parent。"""
 
     def test_subagent_events_carry_parent(self):
         self.transcript.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
-        folder = takeover.subagent_dir(self.transcript)
+        folder = attach.subagent_dir(self.transcript)
         folder.mkdir(parents=True)
         # 照实际格式：子代理记录每行 isSidechain、agentId；meta 里 toolUseId 是派它的 Agent 调用
         (folder / "agent-a1.meta.json").write_text(json.dumps({"toolUseId": "toolu_P", "description": "查文档"}),
@@ -186,7 +186,7 @@ class SubagentSyncTest(SyncTest):
         ]
         (folder / "agent-a1.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         self._registry("busy")
-        state = takeover.sync_one(self.name)
+        state = attach.sync_one(self.name)
         events = [json.loads(line) for line in sideagent._events_path(self.name).read_text().splitlines()]  # noqa: SLF001
         child = [event for event in events if event.get("parent") == "toolu_P"]
         # 交办那句不重复记（详情页用 Agent 调用的描述），工具调用带上 parent
@@ -195,43 +195,43 @@ class SubagentSyncTest(SyncTest):
         # 子代理的话不当成主会话的最后一句
         self.assertNotEqual(state.get("last_say", {}).get("parent"), "toolu_P")
         # 再同步一次，没有新行就不重复记
-        takeover.sync_one(self.name)
+        attach.sync_one(self.name)
         again = sideagent._events_path(self.name).read_text()  # noqa: SLF001
         self.assertEqual(again.count('"toolu_P"'), 1)
 
 
 class SummaryTest(SyncTest):
-    """接管会话的进度短语：在忙才写，用原会话那个号配置的小模型，写进状态和进度行。"""
+    """挂上会话的进度短语：在忙才写，用原会话那个号配置的小模型，写进状态和进度行。"""
 
     def test_busy_session_gets_a_label(self):
         self.transcript.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
         self._registry("busy")
-        state = takeover.sync_one(self.name)
-        self.assertTrue(takeover.summary_due(state, 10**10))
+        state = attach.sync_one(self.name)
+        self.assertTrue(attach.summary_due(state, 10**10))
         calls = []
 
         def runner(model, prompt, env, cwd):
             calls.append((model, env.get("CLAUDE_CONFIG_DIR")))
             return {"ok": True, "text": "Running the bash command"}
 
-        with mock.patch("cca.session.takeover.summary.configured_model", return_value="haiku"):
-            self.assertEqual(takeover.summarize_once(self.name, runner), "ok")
+        with mock.patch("cca.session.attach.summary.configured_model", return_value="haiku"):
+            self.assertEqual(attach.summarize_once(self.name, runner), "ok")
         state = sideagent._read_state(self.name)  # noqa: SLF001
         self.assertEqual(state["summary"], "Running the bash command")
         self.assertEqual(calls, [("haiku", str(self.account_dir))])
         self.assertIn("SUMMARY Running the bash command", sideagent._progress_path(self.name).read_text())  # noqa: SLF001
         # 同步不会把短语盖掉
-        state = takeover.sync_one(self.name)
+        state = attach.sync_one(self.name)
         self.assertEqual(state["summary"], "Running the bash command")
-        self.assertFalse(takeover.summary_due(state, state["summary_at"] + 1))
+        self.assertFalse(attach.summary_due(state, state["summary_at"] + 1))
 
     def test_idle_or_off_skips(self):
-        self.assertEqual(takeover.summarize_once(self.name, lambda *a: {}), "skip idle")
+        self.assertEqual(attach.summarize_once(self.name, lambda *a: {}), "skip idle")
         self.transcript.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
         self._registry("busy")
-        takeover.sync_one(self.name)
-        with mock.patch("cca.session.takeover.summary.configured_model", return_value=""):
-            self.assertEqual(takeover.summarize_once(self.name, lambda *a: {}), "skip off")
+        attach.sync_one(self.name)
+        with mock.patch("cca.session.attach.summary.configured_model", return_value=""):
+            self.assertEqual(attach.summarize_once(self.name, lambda *a: {}), "skip off")
 
 
 class TellTest(unittest.TestCase):
@@ -251,8 +251,8 @@ class TellTest(unittest.TestCase):
             thread = threading.Thread(target=accept)
             thread.start()
             with mock.patch.object(sideagent, "_read_state", return_value={"account": "003", "session_id": "s"}), \
-                 mock.patch.object(takeover, "registry_entry", return_value={"messagingSocketPath": path}):
-                error = takeover.tell("003#bg-x", "run: echo A > b", {"messagingSocketPath": "/me.sock",
+                 mock.patch.object(attach, "registry_entry", return_value={"messagingSocketPath": path}):
+                error = attach.tell("003#bg-x", "run: echo A > b", {"messagingSocketPath": "/me.sock",
                                                                     "name": "ham-76"})
             thread.join(5)
             server.close()
@@ -265,8 +265,8 @@ class TellTest(unittest.TestCase):
 
     def test_not_running_says_so(self):
         with mock.patch.object(sideagent, "_read_state", return_value={"account": "003", "session_id": "s"}), \
-             mock.patch.object(takeover, "registry_entry", return_value={}):
-            self.assertIn("没在跑", takeover.tell("003#bg-x", "hi", {}))
+             mock.patch.object(attach, "registry_entry", return_value={}):
+            self.assertIn("没在跑", attach.tell("003#bg-x", "hi", {}))
 
 
 ROWS = (
@@ -278,15 +278,15 @@ ROWS = (
 class FindTest(unittest.TestCase):
 
     def test_exact_name_and_prefix(self):
-        self.assertEqual([row["account"] for row in takeover.find("train", list(ROWS))], ["006"])
-        self.assertEqual([row["id"] for row in takeover.find("36709", list(ROWS))], ["36709e4a"])
-        self.assertEqual(len(takeover.find("367", list(ROWS))), 2)
-        self.assertEqual(takeover.find("", list(ROWS)), [])
+        self.assertEqual([row["account"] for row in attach.find("train", list(ROWS))], ["006"])
+        self.assertEqual([row["id"] for row in attach.find("36709", list(ROWS))], ["36709e4a"])
+        self.assertEqual(len(attach.find("367", list(ROWS))), 2)
+        self.assertEqual(attach.find("", list(ROWS)), [])
 
     def test_mcp_lists_takeover_tools(self):
         names = [tool["name"] for tool in mcp_sideagent.TOOLS]
-        self.assertIn("sideagent_takeover", names)
-        self.assertIn("sideagent_release", names)
+        self.assertIn("sideagent_attach", names)
+        self.assertIn("sideagent_detach", names)
 
 
 if __name__ == "__main__":
@@ -294,7 +294,7 @@ if __name__ == "__main__":
 
 
 class PickerTest(unittest.TestCase):
-    """接管挑选框的数据：默认只列没在跑的、不列自己、带上最后一句和是否已接管。"""
+    """挂上挑选框的数据：默认只列没在跑的、不列自己、带上最后一句和是否已挂上。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -313,8 +313,8 @@ class PickerTest(unittest.TestCase):
         ]
         side = root / "sideagents"
         side.mkdir()
-        self.patches = [mock.patch.object(takeover, "PROJECTS_DIR", root / "projects"),
-                        mock.patch.object(takeover, "candidates", return_value=rows),
+        self.patches = [mock.patch.object(attach, "PROJECTS_DIR", root / "projects"),
+                        mock.patch.object(attach, "candidates", return_value=rows),
                         mock.patch.object(sideagent, "SIDEAGENT_DIR", side)]
         for patch in self.patches:
             patch.start()
@@ -323,7 +323,7 @@ class PickerTest(unittest.TestCase):
             self.addCleanup(patch.stop)
 
     def test_default_lists_idle_ones_but_not_myself(self):
-        rows = takeover.picker_rows(owner_session="me")
+        rows = attach.picker_rows(owner_session="me")
         self.assertEqual([row["id"] for row in rows], ["s-idle"])
         # 最后一句从对话记录末尾取（夹具里它最后说的是 OK）
         self.assertEqual(rows[0]["last"], "OK")
@@ -331,29 +331,29 @@ class PickerTest(unittest.TestCase):
         self.assertGreater(rows[0]["active_at"], 0)   # 有对话记录就带上最后活动时间
 
     def test_all_includes_running_and_marks_taken_over(self):
-        # 格式改了：被我接管 = 我的名单里有它（kind=attached），不再看 state.json 的 owner_session
+        # 格式改了：被我挂上 = 我的名单里有它（kind=attached），不再看 state.json 的 owner_session
         sideagent._write_state("006#bg-s-busy", {"kind": "attached", "session_id": "s-busy"})  # noqa: SLF001
         write_roster("me", {"006#bg-s-busy": "attached"})
         with mock.patch.object(roster, "owner_alive", return_value=True):
-            rows = {row["id"]: row for row in takeover.picker_rows(include_running=True, owner_session="me")}
+            rows = {row["id"]: row for row in attach.picker_rows(include_running=True, owner_session="me")}
         self.assertEqual(set(rows), {"s-idle", "s-busy"})
         self.assertTrue(rows["s-busy"]["taken_over"])
         self.assertEqual(rows["s-busy"]["taken_by"], [])
 
     def test_taken_by_lists_other_owners(self):
-        # M 对 N：别的会话接管的也列出来（仍然能选），带上那个会话的标题或短编号；主人不在了的不算
+        # M 对 N：别的会话挂上的也列出来（仍然能选），带上那个会话的标题或短编号；主人不在了的不算
         sideagent._write_state("006#bg-s-idle", {"kind": "attached", "session_id": "s-idle"})  # noqa: SLF001
         write_roster("other-session-1234", {"006#bg-s-idle": "attached"})
         write_roster("dead-session-5678", {"006#bg-s-idle": "attached"})
         alive = mock.patch.object(roster, "owner_alive", side_effect=lambda data: data["session"].startswith("other"))
         with alive:
-            rows = {row["id"]: row for row in takeover.picker_rows(owner_session="me")}
+            rows = {row["id"]: row for row in attach.picker_rows(owner_session="me")}
         self.assertFalse(rows["s-idle"]["taken_over"])
         self.assertEqual(rows["s-idle"]["taken_by"], ["other-se"])
 
 
 class CardTest(unittest.TestCase):
-    """接管卡片：有没有 recap 都带上最近几轮问答的原话，再附对话记录路径。"""
+    """挂上卡片：有没有 recap 都带上最近几轮问答的原话，再附对话记录路径。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -361,7 +361,7 @@ class CardTest(unittest.TestCase):
         folder = Path(self.tmp.name) / "projects" / "-w"
         folder.mkdir(parents=True)
         self.path = folder / "s1.jsonl"
-        patch = mock.patch.object(takeover, "PROJECTS_DIR", Path(self.tmp.name) / "projects")
+        patch = mock.patch.object(attach, "PROJECTS_DIR", Path(self.tmp.name) / "projects")
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -386,13 +386,13 @@ class CardTest(unittest.TestCase):
             self.ask("第三件"), self.say("三的答"),
             self.ask("第四件"),
         ])
-        self.assertEqual(takeover.recent_rounds("s1", 3),
+        self.assertEqual(attach.recent_rounds("s1", 3),
                          [("第二件", "二的答"), ("第三件", "三的答"), ("第四件", "")])
 
     def test_card_has_rounds_and_path_without_recap(self):
         self.write([self.ask("做 A"), self.say("A 做完了")])
-        text = takeover.card("s1", account="003", title="任务")
-        self.assertIn("接管了 003/s1「任务」", text)
+        text = attach.card("s1", account="003", title="任务")
+        self.assertIn("挂上了 003/s1「任务」", text)
         self.assertNotIn("回顾：", text)
         self.assertIn("  问：做 A", text)
         self.assertIn("  答：A 做完了", text)
@@ -400,8 +400,8 @@ class CardTest(unittest.TestCase):
 
     def test_card_is_capped(self):
         self.write([r for i in range(5) for r in (self.ask("问" * 500), self.say("答" * 500))])
-        with mock.patch.object(takeover, "TAKEOVER_CARD_TOTAL_CHARS", 400):
-            text = takeover.card("s1", account="003")
+        with mock.patch.object(attach, "ATTACH_CARD_TOTAL_CHARS", 400):
+            text = attach.card("s1", account="003")
         self.assertLessEqual(len(text.split("\n对话记录：")[0]), 401)
 
 
@@ -409,8 +409,8 @@ class AskTextTest(unittest.TestCase):
     def test_system_injected_user_text_is_not_an_ask(self):
         for text in ("<task-notification>x</task-notification>", "<cross-session-message>hi",
                      "This session is being continued from a previous conversation that ran out of context."):
-            self.assertEqual(takeover._ask_text({"type": "user", "message": {"content": text}}), "")  # noqa: SLF001
-        self.assertEqual(takeover._ask_text({"type": "user", "message": {"content": " 查一下 "}}), "查一下")  # noqa: SLF001
+            self.assertEqual(attach._ask_text({"type": "user", "message": {"content": text}}), "")  # noqa: SLF001
+        self.assertEqual(attach._ask_text({"type": "user", "message": {"content": " 查一下 "}}), "查一下")  # noqa: SLF001
 
 
 SID = "3339d1d0-d064-473e-a682-41b731967700"
@@ -422,7 +422,7 @@ def _row(account: str, state: str, started: float, *, running: bool = False, kin
 
 
 class MessageTest(unittest.TestCase):
-    """sideagent_send {session}：不接管，自动找它现在挂的号；没在跑就唤醒再送。"""
+    """sideagent_send {session}：不挂上，自动找它现在挂的号；没在跑就唤醒再送。"""
 
     SENDER = {"sessionId": "me-0000", "messagingSocketPath": "/me.sock",  # noqa: RUF012 - 只读夹具
               "name": "train", "account": "b004"}
@@ -444,13 +444,13 @@ class MessageTest(unittest.TestCase):
             sent.append((entry.get("messagingSocketPath"), text, sender["name"]))
             return ""
 
-        with mock.patch.object(takeover, "candidates", return_value=[dict(r) for r in rows]), \
-             mock.patch.object(takeover, "registry_entry", side_effect=registry), \
-             mock.patch.object(takeover, "_wake", side_effect=wake), \
-             mock.patch.object(takeover, "deliver", side_effect=deliver), \
-             mock.patch.object(takeover, "_spawned_owner", return_value=""), \
-             mock.patch.object(takeover, "WAKE_DELIVER_WAIT", 0):
-            result = takeover.message("enhance-pure", "跑 300/500 判官", self.SENDER,
+        with mock.patch.object(attach, "candidates", return_value=[dict(r) for r in rows]), \
+             mock.patch.object(attach, "registry_entry", side_effect=registry), \
+             mock.patch.object(attach, "_wake", side_effect=wake), \
+             mock.patch.object(attach, "deliver", side_effect=deliver), \
+             mock.patch.object(attach, "_spawned_owner", return_value=""), \
+             mock.patch.object(attach, "WAKE_DELIVER_WAIT", 0):
+            result = attach.message("enhance-pure", "跑 300/500 判官", self.SENDER,
                                       account=account, usable=usable)
         return result, woke, sent
 
@@ -511,35 +511,35 @@ class MessageTest(unittest.TestCase):
 
     def test_refuses_myself_and_spawned_sideagents(self):
         mine = [{**_row("b004", "working", 1, running=True), "session_id": "me-0000"}]
-        with mock.patch.object(takeover, "candidates", return_value=mine):
-            self.assertEqual(takeover.message("me-0000", "hi", self.SENDER)["error"], "这是你自己")
-        with mock.patch.object(takeover, "candidates", return_value=[_row("ds", "done", 1)]), \
-             mock.patch.object(takeover, "_spawned_owner", return_value="cca-skill"):
-            self.assertIn("派出的 sideagent", takeover.message("enhance-pure", "hi", self.SENDER)["error"])
+        with mock.patch.object(attach, "candidates", return_value=mine):
+            self.assertEqual(attach.message("me-0000", "hi", self.SENDER)["error"], "这是你自己")
+        with mock.patch.object(attach, "candidates", return_value=[_row("ds", "done", 1)]), \
+             mock.patch.object(attach, "_spawned_owner", return_value="cca-skill"):
+            self.assertIn("派出的 sideagent", attach.message("enhance-pure", "hi", self.SENDER)["error"])
 
     def test_mcp_send_with_session_does_not_attach(self):
         entry = {"sessionId": "me-0000", "messagingSocketPath": "/me.sock", "name": "train", "pid": 1}
         with mock.patch.object(sideagent, "caller_now", return_value=entry), \
              mock.patch.object(sideagent, "_owner_account", return_value="b004"), \
-             mock.patch.object(takeover, "message", return_value={
+             mock.patch.object(attach, "message", return_value={
                  "account": "b002", "session_id": SID, "label": "enhance-pure", "woke": True}) as sent, \
-             mock.patch.object(takeover, "takeover") as attach:
+             mock.patch.object(attach, "attach") as attached:
             reply = mcp_sideagent._tool_send({"session": "enhance-pure", "message": "hi"})  # noqa: SLF001
         self.assertIn("b002/3339d1d0（enhance-pure）没在跑，已唤醒并送到", reply)
         self.assertEqual(sent.call_args.args[2]["account"], "b004")
-        attach.assert_not_called()
+        attached.assert_not_called()
 
 
-class TakeoverPicksCurrentAccountTest(unittest.TestCase):
+class AttachPicksCurrentAccountTest(unittest.TestCase):
     def test_stale_stopped_registration_is_not_taken_over(self):
         """handoff 后旧号上是 stopped：不写 account 时接的是新号上那条，不去唤醒旧副本。"""
         rows = [_row("001", "stopped", 9), _row("b004", "done", 1)]
         woke = []
-        with mock.patch.object(takeover, "candidates", return_value=rows), \
-             mock.patch.object(takeover, "_spawned_owner", return_value=""), \
-             mock.patch.object(takeover, "registry_entry", return_value={}), \
-             mock.patch.object(takeover, "_wake", side_effect=lambda row: woke.append(row["account"]) or "停在这"):
-            result = takeover.takeover("enhance-pure", {"session": "me", "account": "005"})
+        with mock.patch.object(attach, "candidates", return_value=rows), \
+             mock.patch.object(attach, "_spawned_owner", return_value=""), \
+             mock.patch.object(attach, "registry_entry", return_value={}), \
+             mock.patch.object(attach, "_wake", side_effect=lambda row: woke.append(row["account"]) or "停在这"):
+            result = attach.attach("enhance-pure", {"session": "me", "account": "005"})
         self.assertEqual(woke, ["b004"])
         self.assertIn("b004/", result["error"])
 
@@ -555,19 +555,19 @@ class NarrowByNameTest(unittest.TestCase):
     def test_single_live_session_wins_over_stale_namesakes(self):
         hits = [self.row("e77b8edb-x", "002", running=False), self.row("bb183830-x", "b002", running=True),
                 self.row("bb183830-x", "004", running=False), self.row("e77b8edb-x", "004", running=False)]
-        rows, why = takeover.narrow_by_name(hits)
+        rows, why = attach.narrow_by_name(hits)
         self.assertEqual(why, "")
         self.assertEqual({r["session_id"] for r in rows}, {"bb183830-x"})
         self.assertEqual(len(rows), 2)        # 这段对话的全部登记都留着，后面按 _registration_rank 挑号
 
     def test_none_live_picks_most_recent_activity(self):
         hits = [self.row("old-1", "002", running=False), self.row("new-2", "004", running=False)]
-        with mock.patch.object(takeover, "_last_activity", side_effect=lambda sid: {"old-1": 1.0, "new-2": 2.0}[sid]):
-            rows, why = takeover.narrow_by_name(hits)
+        with mock.patch.object(attach, "_last_activity", side_effect=lambda sid: {"old-1": 1.0, "new-2": 2.0}[sid]):
+            rows, why = attach.narrow_by_name(hits)
         self.assertEqual((why, rows[0]["session_id"]), ("", "new-2"))
 
     def test_several_live_is_still_ambiguous(self):
-        rows, why = takeover.narrow_by_name([self.row("a-1", "002", running=True), self.row("b-2", "004", running=True)])
+        rows, why = attach.narrow_by_name([self.row("a-1", "002", running=True), self.row("b-2", "004", running=True)])
         self.assertEqual(rows, [])
         self.assertIn("都在跑", why)
 
@@ -589,7 +589,7 @@ class LabelNameTest(unittest.TestCase):
 
     def _resolve(self, value, mine):
         with mock.patch.object(mcp_sideagent.jobs, "my_roster", return_value=mine):
-            return mcp_sideagent._named_by_label("sideagent_release", {"name": value})["name"]  # noqa: SLF001
+            return mcp_sideagent._named_by_label("sideagent_detach", {"name": value})["name"]  # noqa: SLF001
 
     def test_current_and_old_label_resolve(self):
         mine = {self.name: {"kind": "attached", "label": "ham-47"}}
@@ -606,12 +606,12 @@ class ShellStatusTest(unittest.TestCase):
     def test_shell_is_idle_not_ended(self):
         from cca.session import backends  # noqa: PLC0415
         state = {"status": "shell", "account": "b005", "session_id": "s", "label": "ham-fa"}
-        with mock.patch.object(takeover, "sync_one", return_value=state):
+        with mock.patch.object(attach, "sync_one", return_value=state):
             self.assertEqual(backends.BACKENDS[roster.ATTACHED].status("005#bg-13ca09b7")["state"], "idle")
 
 
 class ReuseAttachedTest(unittest.TestCase):
-    """换号重启前接管过的会话再接管一次：复用旧记录，面板上不出两条（实测 005#bg-… 和 b005#bg-…）。"""
+    """换号重启前挂上过的会话再挂上一次：复用旧记录，面板上不出两条（实测 005#bg-… 和 b005#bg-…）。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -625,27 +625,27 @@ class ReuseAttachedTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_existing_attached_record_is_reused(self):
-        self.assertEqual(takeover._attached_name_for("13ca09b7-x"), "005#bg-13ca09b7")  # noqa: SLF001
-        self.assertEqual(takeover._attached_name_for("other"), "")  # noqa: SLF001
+        self.assertEqual(attach._attached_name_for("13ca09b7-x"), "005#bg-13ca09b7")  # noqa: SLF001
+        self.assertEqual(attach._attached_name_for("other"), "")  # noqa: SLF001
 
-    def test_release_command_removes_from_roster(self):
+    def test_detach_command_removes_from_roster(self):
         from cca.session import sideagent_cli  # noqa: PLC0415
-        with mock.patch.object(takeover, "release", return_value=0) as release:
-            self.assertEqual(sideagent_cli._release_command(["005#bg-13ca09b7", "owner"]), 0)  # noqa: SLF001
-        release.assert_called_once_with("005#bg-13ca09b7", "owner")
+        with mock.patch.object(attach, "detach", return_value=0) as detach:
+            self.assertEqual(sideagent_cli._detach_command(["005#bg-13ca09b7", "owner"]), 0)  # noqa: SLF001
+        detach.assert_called_once_with("005#bg-13ca09b7", "owner")
 
 
 class AttachedTurnEndNotifyTest(unittest.TestCase):
-    """接管的会话一轮结束：每个挂着它的主会话的收件箱里各一条；同一轮同步几次也只一条。"""
+    """挂上的会话一轮结束：每个挂着它的主会话的收件箱里各一条；同一轮同步几次也只一条。"""
 
     def test_each_holder_gets_one(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(inbox, "INBOX_DIR", Path(tmp) / "inbox"), \
-                mock.patch.object(takeover.roster, "holders", return_value=[{"session": "s1"}, {"session": "s2"}]):
+                mock.patch.object(attach.roster, "holders", return_value=[{"session": "s1"}, {"session": "s2"}]):
             state = {"label": "ham-25"}
             event = {"text": "改完了", "token_count": 10, "seconds": 3}
-            takeover._post_turn_end("b005#bg-1", state, event, 4096)  # noqa: SLF001
-            takeover._post_turn_end("b005#bg-1", state, event, 4096)  # noqa: SLF001
+            attach._post_turn_end("b005#bg-1", state, event, 4096)  # noqa: SLF001
+            attach._post_turn_end("b005#bg-1", state, event, 4096)  # noqa: SLF001
             self.assertEqual(len(inbox.pending(["s1"])), 1)
             self.assertEqual(len(inbox.pending(["s2"])), 1)
             self.assertIn("改完了", inbox.read(inbox.pending(["s1"])[0])["text"])

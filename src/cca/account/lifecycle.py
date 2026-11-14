@@ -68,13 +68,13 @@ from cca.config import (
 from cca.env import LaunchBlocked, build_env, catalog_window_for_slug, is_openrouter, tui_mode
 from cca.errors import die, note, say, warn
 from cca.paths import (
-    shared_dir,
     accounts_root,
     default_settings_file,
     key_file,
     launcher_argv,
     marker_file,
     profile_dir,
+    shared_dir,
 )
 from cca.report import _plain, _table, make_console, state_text
 from cca.session.push import (
@@ -989,7 +989,7 @@ def _move_one(item: dict, target: str, prompt: str = "") -> str:
                 say(f"{item['id']}: 清掉了 {stripped} 处 tool_use.signature（Gemini 历史）")
         # prompt：续上后先说的一句话（自己换号时让它接着做，不然它会停在等输入）。
         # 有原名：启动提示是 /rename <原名>（保住名字），prompt 等目标号登记好再以消息送到。
-        from cca.session.takeover import deliver_after_resume, resume_launch  # noqa: PLC0415
+        from cca.session.attach import deliver_after_resume, resume_launch  # noqa: PLC0415
 
         launch, pending = resume_launch(target, full, prompt)
         problem = _resume_on(item, target, launch)
@@ -1014,7 +1014,7 @@ def _resume_on(item: dict, target: str, launch: list) -> str:
     续之前先清掉目标号上的旧登记（只删面板条目，对话记录不动；带 worktree 的不删）；
     续完要是还复制了，把副本停掉删掉，按失败算（源号已停的由调用方回源号续上）。
     """
-    from cca.session.takeover import clear_stale_registrations  # noqa: PLC0415
+    from cca.session.attach import clear_stale_registrations  # noqa: PLC0415
 
     full = item["full"]
     if (profile_dir(target) / "jobs" / item["id"]).is_dir() and full not in live_session_ids(target):
@@ -1070,7 +1070,7 @@ def _redeliver_by_prompt(item: dict, target: str, full: str, pending: str, error
     目标号上已经没有它的进程（续上就退出了）：再用原提示当启动提示续一次（名字可能被 CC 按提示改掉，
     总比停着强）。进程还在只是套接字不通：续不得（会复制一份），只能喊出来让人手动说一句。
     """
-    from cca.session.takeover import registry_entry  # noqa: PLC0415
+    from cca.session.attach import registry_entry  # noqa: PLC0415
 
     manual = f"它会停在等输入，需要手动说一句（话是：{pending}）"
     if registry_entry(target, full):
@@ -1311,8 +1311,8 @@ def _request_self_move(source: str, target: str) -> int:
     交互会话不是后台任务，`--bg --resume` 只会复制一份，不搬。
     """
     from cca.session import watchdog  # noqa: PLC0415
+    from cca.session.attach import registry_entry  # noqa: PLC0415
     from cca.session.push import shares_sessions  # noqa: PLC0415
-    from cca.session.takeover import registry_entry  # noqa: PLC0415
 
     full = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
     if target:
@@ -1341,7 +1341,7 @@ def _request_stay() -> int:
     只免「到提醒点」的搬迁；真撞墙了照样搬。
     """
     from cca.session import watchdog  # noqa: PLC0415
-    from cca.session.takeover import registry_entry  # noqa: PLC0415
+    from cca.session.attach import registry_entry  # noqa: PLC0415
 
     source = _current_profile()
     full = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
@@ -1423,7 +1423,7 @@ def target_problem(target: str) -> str:
 
 def _tell_session(account: str, full: str, text: str) -> None:
     """给一条还活着的会话说一句（原生跨会话消息），让它接着干。"""
-    from cca.session.takeover import deliver, registry_entry  # noqa: PLC0415
+    from cca.session.attach import deliver, registry_entry  # noqa: PLC0415
 
     error = deliver(registry_entry(account, full), text, {"name": "cca"})
     if error:
@@ -1436,7 +1436,7 @@ def _resume_back(account: str, full: str, text: str, *, cwd: str = "") -> None:
         path = session_transcript(profile_dir(account), full[:8])
         cwd = _scan_transcript(path).get("cwd", "") if path is not None else ""
     cwd = launch_dir(cwd) if cwd else ""
-    from cca.session.takeover import deliver_after_resume, resume_launch  # noqa: PLC0415
+    from cca.session.attach import deliver_after_resume, resume_launch  # noqa: PLC0415
 
     launch, pending = resume_launch(account, full, text)
     try:

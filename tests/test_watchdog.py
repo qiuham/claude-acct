@@ -778,7 +778,7 @@ class LoopTest(AccountsCase):
         loop.armed["sid-1"] = {"decision": self.decision(), "idle": 0, "settled": 0}
         executed = []
         turns = iter(["ended", "ended"])
-        with mock.patch("cca.session.takeover.registry_entry", return_value={"status": "shell"}), \
+        with mock.patch("cca.session.attach.registry_entry", return_value={"status": "shell"}), \
              mock.patch.object(watchdog, "turn_state", side_effect=lambda *_: next(turns)), \
              mock.patch.object(watchdog, "execute", side_effect=lambda d, **_k: executed.append(d.action) or True):
             loop.poll_armed()
@@ -786,7 +786,7 @@ class LoopTest(AccountsCase):
             loop.poll_armed()
         self.assertEqual(executed, [watchdog.ARMED])
         loop.armed["sid-1"] = {"decision": self.decision(), "idle": 0, "settled": 0}
-        with mock.patch("cca.session.takeover.registry_entry", return_value={"status": "busy"}), \
+        with mock.patch("cca.session.attach.registry_entry", return_value={"status": "busy"}), \
              mock.patch.object(watchdog, "turn_state", return_value="walled"), \
              mock.patch.object(watchdog, "execute", side_effect=lambda d, **_k: executed.append(d.action) or True):
             loop.poll_armed()
@@ -795,7 +795,7 @@ class LoopTest(AccountsCase):
     def test_poll_armed_drops_a_session_that_vanished(self):
         loop = watchdog.Loop()
         loop.armed["sid-1"] = {"decision": self.decision(), "idle": 1, "settled": 0}
-        with mock.patch("cca.session.takeover.registry_entry", return_value={}):
+        with mock.patch("cca.session.attach.registry_entry", return_value={}):
             loop.poll_armed()
         self.assertEqual(loop.armed, {})
 

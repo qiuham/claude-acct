@@ -377,7 +377,7 @@ def _summary_log_path(name: str) -> Path:
 
 
 def _lock_path(name: str) -> Path:
-    """跨进程锁：改 result.json、同步接管的会话都用它。
+    """跨进程锁：改 result.json、同步挂上的会话都用它。
 
     放在文件夹顶上、不放 run/：停了以后 MCP 还要加锁改 result.json，放 run/ 会让 run/ 又冒出来。
     """

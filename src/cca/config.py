@@ -136,11 +136,11 @@ AGENTS_RECENT_DAYS = 3
 # live_index 并行查各号在跑的会话，最多开几个线程
 LIVE_INDEX_WORKERS = 12
 
-# 接管卡片：接管时交给主会话的几行字。最近几轮问答的原话，每轮每边截多少字，整张卡片最多多少字
-TAKEOVER_CARD_ROUNDS = 3
-TAKEOVER_CARD_TURN_CHARS = 300
-TAKEOVER_CARD_TOTAL_CHARS = 2000
-# 挑选框“已被 X 接管”里两个主会话标题一样时，带上它最后那句话的前几个字来区分
+# 挂上卡片：挂上时交给主会话的几行字。最近几轮问答的原话，每轮每边截多少字，整张卡片最多多少字
+ATTACH_CARD_ROUNDS = 3
+ATTACH_CARD_TURN_CHARS = 300
+ATTACH_CARD_TOTAL_CHARS = 2000
+# 挑选框“已被 X 挂上”里两个主会话标题一样时，带上它最后那句话的前几个字来区分
 TAKEN_BY_ASK_CHARS = 12
 
 # sideagent 目录（一个 sideagent 一个文件夹）和主会话名单（sessions/<会话编号>.json），见 docs/specs/sideagent-mn.md
@@ -255,7 +255,7 @@ STATE_STYLES = {
     "working": ("working", "yellow"),
     "blocked": ("blocked", "magenta"),
     "idle": ("idle", "dim"),
-    "shell": ("idle", "dim"),        # 接管的会话停在终端里，按空闲画
+    "shell": ("idle", "dim"),        # 挂上的会话停在终端里，按空闲画
     "done": ("done", "green"),
     "failed": ("failed", "bold red"),
     "waiting": ("waiting", "yellow"),
@@ -531,7 +531,7 @@ COMMAND_USAGE = {
     "handoff": """cca handoff <源号> <目标号> [--only=<前缀|标题>]… [--all] [--dry-run] —— 把会话搬到另一个号
 
   做两步: 源号 stop（只停不删，对话保留）→ 目标号 `--bg --resume <完整id>` 接管同一条
-  默认只搬"没在跑的"（接管会继续跑，烧目标号的额度）；--all 连在跑的一起
+  默认只搬"没在跑的"（接管后会继续跑，烧目标号的额度）；--all 连在跑的一起
   非 tty 必须给 --only 或 --all（脚本里不留"猜你想搬哪条"）
   --attach 搬完直接进那条会话（等价再敲一次 cca <目标号> attach <id>）
   --current 自己换号：在后台会话里敲 cca handoff [<目标号>] --current，源号和会话 id 自己认（不写目标号就按额度挑）；
@@ -643,11 +643,11 @@ COMMAND_USAGE = {
     "sideagent": """cca sideagent <子命令> —— sideagent 的命令行入口（派活在对话里用 sideagent_* 工具）
 
   tell [--interject] <实例名> 「要说的话」   给 sideagent 发一句；面板输入框用的就是它
-  takeover-candidates [--all]              本机各号能接管的会话（JSON，一会话一行）
-  hook install|uninstall --profile <号>|--all   接管会话的「请确认」转到面板上点
+  attach-candidates [--all]              本机各号能挂上的会话（JSON，一会话一行）
+  hook install|uninstall --profile <号>|--all   挂上会话的「请确认」转到面板上点
   version                                  当前 sideagent 代码版本（面板据此标「旧版」）
 
-  其余子命令（takeover、bg-sync、latest、stop-owned、permission-*）给面板和 MCP 服务内部用。
+  其余子命令（attach、bg-sync、latest、stop-owned、permission-*）给面板和 MCP 服务内部用。
 """,
     "version": "cca version —— 打印版本（VERSION 文件）\n",
     "quota-hint": """cca quota-hint [<号>] [--json] [--session <完整会话编号>] —— 额度快满时换不换号、换到哪

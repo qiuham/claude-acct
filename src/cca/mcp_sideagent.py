@@ -35,7 +35,7 @@ from contextlib import redirect_stderr
 
 from cca.errors import die, say
 from cca.paths import global_config_file
-from cca.session import backends, inbox, jobs, sideagent, takeover
+from cca.session import attach, backends, inbox, jobs, sideagent
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "sideagents"
@@ -55,7 +55,7 @@ TOOLS = [
                         "任务编号新给一个；记录找不到会报错。返回任务编号，用 sideagent_result 取结果。\n"
                         "3. session 写别的会话的编号前缀或标题 = 给它发一句话（不用写 account）："
                         "不管它在哪个号、在跑还是已经 done / stopped，都会找到它现在挂的号，没在跑就唤醒，"
-                        "用原生跨会话消息送到，它回话会回到这里。不接管、不进面板。"
+                        "用原生跨会话消息送到，它回话会回到这里。不挂上、不进面板。"
                         "原生 SendMessage 发不到（not reachable、ListAgents 里没有）的会话就用这个，"
                         "不要说它「下线了」、也不要等它「上线」。"),
         "inputSchema": {
@@ -133,28 +133,28 @@ TOOLS = [
         },
     },
     {
-        "name": "sideagent_takeover",
-        "description": ("接管一个 Claude Code 原生会话（后台会话或别的会话），挂到本会话的 sideagent 面板上，"
-                        "本号、跨号都行。不给 session = 列出本机各号能接管的会话（编号、号、目录、标题、状态）。"
-                        "给 session（编号前缀、完整会话编号或名字）= 接管：没在跑就在它原来的号上用 "
+        "name": "sideagent_attach",
+        "description": ("挂上一个 Claude Code 原生会话（后台会话或别的会话），挂到本会话的 sideagent 面板上，"
+                        "本号、跨号都行。不给 session = 列出本机各号能挂上的会话（编号、号、目录、标题、状态）。"
+                        "给 session（编号前缀、完整会话编号或名字）= 挂上：没在跑就在它原来的号上用 "
                         "claude --bg --resume 接着跑（原来是后台会话的保留原编号和原设置；普通会话一律全部自动批准），"
                         "返回接上后的名字，之后它的进度和完成通知会一直送进本会话、显示在面板上。"
-                        "只想给它发一句话不用接管：sideagent_send {session: ...} 会自动找号、唤醒、投递。"
-                        "本会话退出时不会停它；从面板拿掉用 sideagent_release。"),
+                        "只想给它发一句话不用挂上：sideagent_send {session: ...} 会自动找号、唤醒、投递。"
+                        "本会话退出时不会停它；从面板拿掉用 sideagent_detach。"),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session": {"type": "string", "description": "会话编号前缀、完整编号或名字；不给就列出能接管的"},
+                "session": {"type": "string", "description": "会话编号前缀、完整编号或名字；不给就列出能挂上的"},
                 "account": {"type": "string", "description": "可选：只在这个号里找（默认所有号）"},
             },
         },
     },
     {
-        "name": "sideagent_release",
-        "description": "把 sideagent_takeover 接上的会话从本会话的面板上拿掉；会话本身不停，接着跑。",
+        "name": "sideagent_detach",
+        "description": "把 sideagent_attach 接上的会话从本会话的面板上拿掉；会话本身不停，接着跑。",
         "inputSchema": {
             "type": "object",
-            "properties": {"name": {"type": "string", "description": "sideagent_takeover 返回的名字"}},
+            "properties": {"name": {"type": "string", "description": "sideagent_attach 返回的名字"}},
             "required": ["name"],
         },
     },
@@ -213,7 +213,7 @@ def serve() -> int:
             protocol_out.write(json.dumps(response, ensure_ascii=False) + "\n")
             protocol_out.flush()
 
-    # 本会话接管的原生会话：后台线程定时同步进面板读的文件，面板就不用每次刷新起进程
+    # 本会话挂上的原生会话：后台线程定时同步进面板读的文件，面板就不用每次刷新起进程
     stop_sync = threading.Event()
     threading.Thread(target=backends.sync_loop, args=(stop_sync, jobs.my_session),
                      daemon=True, name="sideagent-sync").start()
@@ -278,7 +278,7 @@ def _call(request_id, params: dict) -> dict:
 
 
 # 这几个工具的 name / account 可以写面板上看到的名字（例如 ham-fa），不只是记录名（005#bg-13ca09b7）
-_NAME_ARGS = {"sideagent_release": "name", "sideagent_stop": "account", "sideagent_status": "account",
+_NAME_ARGS = {"sideagent_detach": "name", "sideagent_stop": "account", "sideagent_status": "account",
               "sideagent_result": "account", "sideagent_interrupt": "account", "sideagent_send": "account"}
 
 
@@ -295,7 +295,7 @@ def _named_by_label(tool: str, arguments: dict) -> dict:
 
 
 def _owned(name: str, mine: dict | None = None) -> bool:
-    """这个 sideagent 是不是本会话用着的（派出的或接管的）；规则见 jobs.owns。"""
+    """这个 sideagent 是不是本会话用着的（派出的或挂上的）；规则见 jobs.owns。"""
     return jobs.owns(name, mine)
 
 
@@ -466,19 +466,19 @@ def _tool_status(arguments: dict) -> str:
 
 
 def _send_to_session(key: str, message: str, account: str) -> str:
-    """给任意一条会话发一句话（不接管）：它挂在哪个号就发到哪，没在跑先唤醒。"""
+    """给任意一条会话发一句话（不挂上）：它挂在哪个号就发到哪，没在跑先唤醒。"""
     if not message:
         return "要给 message"
     entry = sideagent.caller_now()
     if not entry.get("messagingSocketPath"):
         return "找不到本会话的登记条目，对方回话没处送；重启会话后再试"
     sender = {**entry, "account": sideagent._owner_account()}  # noqa: SLF001
-    result = takeover.message(key, message, sender, account=account, usable=_unusable_reason)
+    result = attach.message(key, message, sender, account=account, usable=_unusable_reason)
     if result.get("error"):
         return str(result["error"])
     where = f"{result['account']}/{result['session_id'][:8]}（{result['label'] or '无标题'}）"
     how = "没在跑，已唤醒并送到" if result["woke"] else "在跑，已送到"
-    return (f"{where}{how}。它的回话会作为跨会话消息回到这里；没有接管，它的进度不会进本会话。"
+    return (f"{where}{how}。它的回话会作为跨会话消息回到这里；没有挂上，它的进度不会进本会话。"
             "还要说就再用同样的 session 发。")
 
 
@@ -494,21 +494,21 @@ def _unusable_reason(name: str) -> str:
 
 
 def _send_direct(name: str, message: str, backend: backends.Backend) -> str:
-    """不走后台任务的实例（接管的原生会话）：直接发一句，结果看面板或 sideagent_result。"""
+    """不走后台任务的实例（挂上的原生会话）：直接发一句，结果看面板或 sideagent_result。"""
     if not _owned(name):
-        return f"{name} 不是本会话接管的"
+        return f"{name} 不是本会话挂上的"
     error = backend.tell(name, message, interject=True)
-    return error or (f"已发给 {name}（接管的原生后台会话），它在忙就在下一个工具调用结束时看到。"
+    return error or (f"已发给 {name}（挂上的原生后台会话），它在忙就在下一个工具调用结束时看到。"
                      "它闲下来时面板会通知；也可以用 sideagent_result 看它最后说的话。")
 
 
-def _tool_takeover(arguments: dict) -> str:
+def _tool_attach(arguments: dict) -> str:
     key = str(arguments.get("session") or "").strip()
     account = str(arguments.get("account") or "").strip()
     if not key:
-        rows = takeover.candidates([account] if account else None)
+        rows = attach.candidates([account] if account else None)
         if not rows:
-            return "本机没有能接管的会话"
+            return "本机没有能挂上的会话"
         return json.dumps([{k: row[k] for k in ("account", "id", "name", "kind", "cwd", "state")}
                            for row in rows], ensure_ascii=False)
     entry = sideagent.caller_now()
@@ -516,21 +516,21 @@ def _tool_takeover(arguments: dict) -> str:
               "instance_socket": str(entry.get("messagingSocketPath") or "")} if entry else {})
     if not owner.get("session"):
         return "找不到本会话的登记条目，接不上（面板要按会话认归属）"
-    result = takeover.takeover(key, owner, account=account)
+    result = attach.attach(key, owner, account=account)
     if result.get("error"):
         return str(result["error"])
     how = "已在原号接着跑" if result.get("woke") else "本来就在跑"
-    return (f"已接管 {result['account']}/{result['session_id'][:8]}（{result['label'] or '无标题'}），{how}。"
+    return (f"已挂上 {result['account']}/{result['session_id'][:8]}（{result['label'] or '无标题'}），{how}。"
             f"名字 {result['name']}：用 sideagent_send 发给这个名字；它闲下来时面板会通知。"
             + (f"\n\n{result['card']}" if result.get("card") else ""))
 
 
-def _tool_release(arguments: dict) -> str:
+def _tool_detach(arguments: dict) -> str:
     name = str(arguments.get("name") or "")
     if not backends.backend_for(name).outlives_owner or name not in jobs.my_roster():
-        return f"{name} 不是本会话接管的会话"
-    left = takeover.release(name, _my_session())
-    others = f"；还有 {left} 个会话接管着它" if left else ""
+        return f"{name} 不是本会话挂上的会话"
+    left = attach.detach(name, _my_session())
+    others = f"；还有 {left} 个会话挂上着它" if left else ""
     return f"{name} 已从本会话的面板拿掉；会话本身没停{others}"
 
 
@@ -731,8 +731,8 @@ TOOL_HANDLERS = {
     "sideagent_send": _tool_send,
     "sideagent_status": _tool_status,
     "sideagent_accounts": _tool_accounts,
-    "sideagent_takeover": _tool_takeover,
-    "sideagent_release": _tool_release,
+    "sideagent_attach": _tool_attach,
+    "sideagent_detach": _tool_detach,
     "sideagent_stop": _tool_stop,
     "sideagent_result": _tool_result,
     "sideagent_interrupt": _tool_interrupt,

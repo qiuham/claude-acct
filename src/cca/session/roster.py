@@ -6,7 +6,7 @@
 - 查“我用着谁”：读我的文件；主会话编号会因为 /bg、← 换（session_chain 能顺着找到一串），
   一串编号的文件合起来算；写的时候写到最新的编号，旧编号文件里的条目并过来、旧文件删掉。
 - 查“谁用着它”：扫 sessions/*.json，主人已经不在了的不算。
-- 派出的（spawned）只有一个主人；接管的（attached）可以有多个（M 对 N）。
+- 派出的（spawned）只有一个主人；挂上的（attached）可以有多个（M 对 N）。
 
 还管过期清理（cleanup）。老的平铺格式由 scripts/migrate_sideagent_layout.py 一次性迁移，运行时不认老格式。
 """
@@ -50,7 +50,7 @@ def roster_path(session: str) -> Path:
 
 
 def kind_of(state: dict) -> str:
-    """state.json 里的种类：attached 是接管的，其余（没写的）是派出的。"""
+    """state.json 里的种类：attached 是挂上的，其余（没写的）是派出的。"""
     return ATTACHED if str(state.get("kind") or "") == ATTACHED else SPAWNED
 
 
@@ -188,7 +188,7 @@ def adopt(owner: dict) -> dict:
 
 
 def add(owner: dict, name: str, kind: str, **fields) -> None:
-    """在我的名单里加一条（派出、接管时）；已有就只更新给了值的字段，since 不变。"""
+    """在我的名单里加一条（派出、挂上时）；已有就只更新给了值的字段，since 不变。"""
     if not owner.get("session") or not name:
         return
     with _locked():
@@ -263,9 +263,9 @@ CLEANUP_STAMP = ".cleanup"
 def cleanup(*, force: bool = False) -> None:
     """顺手清理（规则 9），在已有入口里调（cca sideagent ls、派活、MCP 同步线程），不另起进程：
 
-    - 接管的会话没有活着的主人了：写 finished_at（规则 5、6）。
+    - 挂上的会话没有活着的主人了：写 finished_at（规则 5、6）。
     - finished_at 超过 SIDEAGENT_KEEP_DAYS 的整个文件夹删掉，名单里指向它的条目也删掉。
-    - 名单里主人不在了的：接管的条目删掉（只当作解开）；删完空了的名单文件删掉。
+    - 名单里主人不在了的：挂上的条目删掉（只当作解开）；删完空了的名单文件删掉。
     没到 SIDEAGENT_CLEANUP_SECONDS 就直接返回（force 除外）。
     """
     root = core.SIDEAGENT_DIR
@@ -285,7 +285,7 @@ def cleanup(*, force: bool = False) -> None:
 
 
 def _sweep_agents(now: float) -> set:
-    """文件夹那一遍：接管的按有没有活着的主人写上/去掉 finished_at；过了保留天数的删掉。返回删掉的名字。"""
+    """文件夹那一遍：挂上的按有没有活着的主人写上/去掉 finished_at；过了保留天数的删掉。返回删掉的名字。"""
     gone = set()
     for name in core.agent_names():
         state = core._read_state(name)  # noqa: SLF001
@@ -310,7 +310,7 @@ def _sweep_agents(now: float) -> set:
 
 
 def _sweep_rosters(gone: set, alive_by_file: dict) -> None:
-    """名单那一遍：删掉指向已删文件夹的条目；主人不在了的，接管的条目删掉，删空了整个文件删掉。"""
+    """名单那一遍：删掉指向已删文件夹的条目；主人不在了的，挂上的条目删掉，删空了整个文件删掉。"""
     with _locked():
         for path in _all_files():
             data = read(path.stem)
