@@ -77,6 +77,14 @@ def account_proxy_file(name: str) -> Path:
     """订阅号的代理文件（0600，一行地址）；API 号存在清单里。"""
     return profile_dir(name) / ACCOUNT_PROXY_FILE
 
+def prompt_patch_cache_file() -> Path:
+    """系统提示补丁的记录（改了哪几个字节、原文是什么）：含还原所需的原文。"""
+    return state_dir() / "prompt-patch.json"
+
+def prompt_rules_file() -> Path:
+    """自定义匹配规则的 JSON；没有就用内置的两条。"""
+    return state_dir() / "prompt-rules.json"
+
 def usage_cache_file() -> Path:
     return accounts_root() / "_usage-cache.json"
 

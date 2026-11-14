@@ -109,6 +109,7 @@ HELP_SECTIONS = (
     )),
     ("设置与维护", (
         ("cca set proxy <号>|--global <url|none>", "代理，单号优先；其余设置见 cca set --help"),
+        ("cca prompt [replace|restore]", "把系统提示里那段“两用工具要授权”等长换成空格"),
         ("cca sync <号>", "按默认 settings 重新播种（~/.cca/defaults/settings.json）"),
         ("cca doctor [--online]", "体检"),
         ("cca version", "版本"),
@@ -138,6 +139,31 @@ def usage() -> str:
                   "不经 cca 直接跑 claude 用的是 ~/.claude。"]
     return "\n".join(lines) + "\n"
 
+def _ensure_prompt_patch(exe: str) -> None:
+    """启动前确保系统提示补丁在这份文件上。
+
+    幂等：指纹（路径+大小+mtime）没变就直接返回，不读那 366MB。升级换了新文件才会真正动手。
+    任何异常都只提示一行，绝不拦住启动。
+    """
+    try:
+        from cca import prompt_patch as pp  # noqa: PLC0415 - 只在不命中缓存时才需要
+        from cca.paths import prompt_patch_cache_file, prompt_rules_file  # noqa: PLC0415
+
+        cache_file = prompt_patch_cache_file()
+        if not pp.enabled(cache_file):
+            return
+        path = Path(exe).resolve()
+        if not pp.needs_work(path, cache_file):
+            return
+        result = pp.apply_to(path, pp.load_rules(prompt_rules_file()), cache_file)
+        if result["status"] == "patched":
+            note(f"系统提示补丁：{path.name} 改了 {result['hits']} 处")
+        elif result["status"] == "nomatch":
+            note(f"系统提示里没匹配到要删的那句（{path.name}），可能这版改过措辞；文件没动")
+    except Exception as exc:  # noqa: BLE001 - 补丁失败不该影响起会话
+        note(f"系统提示补丁跳过：{exc}")
+
+
 def cmd_run(name_or_none, claude_args: list) -> int:
     from cca.account.lifecycle import (  # noqa: PLC0415 - lifecycle 顶部导入本模块，延迟破环
         no_browser_env,
@@ -163,6 +189,7 @@ def cmd_run(name_or_none, claude_args: list) -> int:
     exe = shutil.which("claude")
     if not exe:
         die("找不到 claude 可执行文件，请确认已安装且在 PATH 中")
+    _ensure_prompt_patch(exe)
     claude_args, pending = _keep_name_on_bg_resume(name, claude_args)
     claude_args = api_launch_args(name, claude_args)
     clear_stale_resume_job(name, claude_args)
@@ -289,6 +316,7 @@ def main(argv=None) -> int:
         cmd_model,
         cmd_models,
         cmd_new,
+        cmd_prompt,
         cmd_rename,
         cmd_rm,
         cmd_set,
@@ -356,6 +384,7 @@ def main(argv=None) -> int:
         "agents": cmd_agents,
         "which": cmd_which,
         "set": cmd_set,
+        "prompt": cmd_prompt,
         "sync": cmd_sync,
         "doctor": cmd_doctor,
     }

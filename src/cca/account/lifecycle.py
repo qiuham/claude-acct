@@ -74,6 +74,8 @@ from cca.paths import (
     launcher_argv,
     marker_file,
     profile_dir,
+    prompt_patch_cache_file,
+    prompt_rules_file,
     shared_dir,
 )
 from cca.report import _plain, _table, make_console, state_text
@@ -2079,6 +2081,94 @@ def _set_summary(args: list) -> int:
     say(f"{name}: 进度短语用 {value}" if value.lower() not in ("off", "none", "-")
         else f"{name}: 不写进度短语，横条显示工具的活动描述")
     note("新起的 sideagent 生效；已经在跑的下次写短语时就会读到")
+    return 0
+
+
+PROMPT_USAGE = "用法: cca prompt [status|replace|restore]"
+
+
+def _prompt_target() -> tuple:
+    """返回 (claude 真实路径, 缓存文件, 规则)。缓存文件由 prompt_patch 自己读写。"""
+    from cca import prompt_patch as pp  # noqa: PLC0415
+
+    exe = shutil.which("claude")
+    if not exe:
+        die("找不到 claude 可执行文件，请确认已安装且在 PATH 中")
+    return Path(exe).resolve(), prompt_patch_cache_file(), pp.load_rules(prompt_rules_file())
+
+
+def _prompt_replace(path: Path) -> None:
+    """替换 + 打开自动：之后升级换了文件，启动时自动重做。"""
+    from cca import prompt_patch as pp  # noqa: PLC0415
+
+    pp.set_enabled(prompt_patch_cache_file(), value=True)
+    result = pp.apply_to(path, pp.load_rules(prompt_rules_file()), prompt_patch_cache_file())
+    messages = {
+        "patched": lambda r: f"{path.name}: 已替换 {r['hits']} 处为等长空格（文件长度不变）",
+        "already": lambda r: f"{path.name}: 已经替换过（记录 {r['hits']} 处），没再动",
+        "missing": lambda _r: f"{path} 不存在",
+    }
+    if result["status"] == "nomatch":
+        note(f"{path.name}: 没匹配到要替换的那段，可能这版改过措辞；文件没动")
+        return
+    say(messages[result["status"]](result))
+
+
+def _prompt_restore(path: Path) -> None:
+    """还原 + 关掉自动：不然下次启动会立刻又替换回去，还原等于白做。"""
+    from cca import prompt_patch as pp  # noqa: PLC0415
+
+    result = pp.revert(path, prompt_patch_cache_file())
+    pp.set_enabled(prompt_patch_cache_file(), value=False)
+    text = {
+        "reverted": f"{path.name}: 已还原 {result['hits']} 处，逐字节写回",
+        "nothing": f"{path.name}: 没有替换记录，文件本来就没动过",
+        "mismatch": f"{path.name}: 记录和当前文件对不上（版本换过），没动文件",
+    }
+    say(text.get(result["status"], text["mismatch"]))
+
+
+def _prompt_status(path: Path, rules: tuple) -> None:
+    from cca import prompt_patch as pp  # noqa: PLC0415
+
+    cache_file = prompt_patch_cache_file()
+    active = pp.enabled(cache_file)
+    known = pp.read_cache(cache_file).get(str(path)) or {}
+    st = path.stat()
+    same = (known.get("size"), known.get("mtime_ns")) == (st.st_size, st.st_mtime_ns)
+    hits = int(known.get("hits") or 0)
+    say(f"文件: {path}")
+    if active:
+        say("自动: 开" + ("（已记录指纹，启动不会重复动）" if same else "（还没记指纹，下次启动会处理）"))
+    else:
+        say("自动: 关（启动不会碰文件）")
+    if hits and same:
+        say(f"状态: 已替换（{hits} 处）")
+    else:
+        say("状态: 未替换 —— 下次启动会处理；想马上生效用 cca prompt replace")
+    source = prompt_rules_file() if prompt_rules_file().is_file() else "内置默认"
+    say(f"规则: {len(rules)} 条，来自 {source}")
+
+
+def cmd_prompt(argv: list) -> int:
+    """`cca prompt`：把系统提示里那段"两用工具要授权"等长替换成空格。
+
+    只改写命中的字符串，长度不变，其余 27k 提示和动态内容（工作目录、记忆路径）都不动。
+    默认带自动：每次启动比对文件指纹，升级换了新文件就自动重做一次。
+    """
+    from cca import prompt_patch as pp  # noqa: PLC0415
+
+    action = (argv[0] if argv else "status").lower()
+    if action not in ("status", "replace", "restore"):
+        die(PROMPT_USAGE)
+    path, _cache_file, rules = _prompt_target()
+
+    if action == "replace":
+        _prompt_replace(path)
+    elif action == "restore":
+        _prompt_restore(path)
+    else:
+        _prompt_status(path, rules)
     return 0
 
 
