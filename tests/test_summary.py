@@ -233,3 +233,31 @@ class ServerSummaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunModelStdinTest(unittest.TestCase):
+    def test_child_does_not_read_parent_stdin(self):
+        """摘要子进程不能继承 stdin：MCP 服务的 stdin 是 Claude Code 发请求的管道，被 claude -p 读走请求就丢了。"""
+        import os  # noqa: PLC0415
+
+        from cca.session import summary  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "claude"
+            # 假 claude：把能从 stdin 读到的东西原样当作结果文本吐出来
+            fake.write_text("#!/bin/sh\nprintf '{\"result\": \"%s\"}' \"$(cat)\"\n", encoding="utf-8")
+            fake.chmod(0o755)
+            read_end, write_end = os.pipe()
+            os.write(write_end, b"REQUEST")
+            os.close(write_end)   # 写完就关：继承了 stdin 的话 cat 能读到 EOF，不会卡住
+            saved = os.dup(0)
+            try:
+                os.dup2(read_end, 0)
+                with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ['PATH']}"}):
+                    out = summary.run_model("haiku", "p", dict(os.environ), tmp)
+            finally:
+                os.dup2(saved, 0)
+                for fd in (saved, read_end):
+                    os.close(fd)
+        self.assertTrue(out.get("ok"), out)
+        self.assertNotIn("REQUEST", json.dumps(out))

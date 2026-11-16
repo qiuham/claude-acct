@@ -162,7 +162,7 @@ def _run_claude(name: str, args: list, *, timeout: float = 20.0, extra_env: dict
         return None, "找不到 claude"
     try:
         env = {**build_env(name), **(extra_env or {})}
-        return subprocess.run([exe, *args], capture_output=True, text=True,  # noqa: S603
+        return subprocess.run([exe, *args], capture_output=True, text=True, stdin=subprocess.DEVNULL,  # noqa: S603
                               timeout=timeout, env=env, check=False), ""
     except subprocess.TimeoutExpired:
         return None, "claude 超时"

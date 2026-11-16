@@ -10,16 +10,30 @@ const QUOTA_POLL_MIN_MS = 30 * 1000
 // 会话刚起来先等一会儿再查：开场那一阵不抢资源
 export const QUOTA_FIRST_MS = 30 * 1000
 
-// `cca quota-hint --json` 的输出 → { hint: { key, text } | null, nextMs }；读不懂就当不用提醒
+// `cca quota-hint --json` 的输出 → { hint: { key, text } | null, nextMs, targets }；读不懂就当不用提醒
+// targets：能换过去的号（/cca handoff 的挑选框和补全用），[{ profile, five, seven, roomy, auto }]
 export function parseQuota(stdout) {
   try {
     const data = JSON.parse(String(stdout || ''))
     const next = Number(data?.next_check_seconds) * 1000
     const hint = data && data.warn && data.key && data.text ? { key: String(data.key), text: String(data.text) } : null
-    return { hint, nextMs: Number.isFinite(next) && next >= QUOTA_POLL_MIN_MS ? next : QUOTA_POLL_MS }
+    return { hint, nextMs: Number.isFinite(next) && next >= QUOTA_POLL_MIN_MS ? next : QUOTA_POLL_MS,
+      targets: parseTargets(data?.targets) }
   } catch {
-    return { hint: null, nextMs: QUOTA_POLL_MS }
+    return { hint: null, nextMs: QUOTA_POLL_MS, targets: null }
   }
+}
+
+// null = cca 没给（旧版 cca 或出错）；[] = 给了但没有能换的号
+export function parseTargets(raw) {
+  if (!Array.isArray(raw)) return null
+  return raw.filter((one) => one?.profile).map((one) => ({
+    profile: String(one.profile),
+    five: Number(one.five_hour) || 0,
+    seven: Number(one.seven_day) || 0,
+    roomy: Boolean(one.roomy),
+    auto: Boolean(one.auto),
+  }))
 }
 
 export function parseHint(stdout) {

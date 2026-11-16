@@ -158,6 +158,24 @@ def ranked_targets(rows: list, account: str, *, limits: dict, shares, now: float
     return sorted(candidates, key=key)
 
 
+def target_choices(rows: list, account: str, *, shares, session: str = "") -> list:
+    """换号挑选框用：能换过去的号（和自动换号同一套排序），每个带两个窗口已用多少。
+
+    `auto` 标出不指定号时会选哪个（和 watchdog / --current 不写号时一致）。
+    """
+    now = time.time()
+    limits = thresholds()
+    ranked = ranked_targets(rows, account, limits=limits, shares=shares, now=now)
+    pick = pick_target(rows, account, limits=limits, shares=shares, now=now, session=session)
+    out = []
+    for row in ranked:
+        windows = (row.get("usage") or {}).get("windows") or {}
+        used = {key: int((live_window(windows.get(key), now) or {}).get("percent") or 0) for key in WINDOWS}
+        out.append({"profile": row["profile"], "five_hour": used["five_hour"], "seven_day": used["seven_day"],
+                    "roomy": roomy(row, limits, now), "auto": bool(pick) and pick["profile"] == row["profile"]})
+    return out
+
+
 def _why(target: dict, limits: dict, now: float) -> str:
     """为什么推荐这个号（一句，放进括号里）。"""
     if roomy(target, limits, now):
@@ -395,8 +413,10 @@ def cmd_quota_hint(args: list) -> int:
     else:
         # 点了号、或者不在会话里：是人在终端里看，不是会话里的模型
         kind = "cli" if named or not session else _session_kind(account, session)
-        result = advise(account, "" if kind == "cli" else session, rows=account_rows(account),
-                        shares=shares_sessions, kind=kind)
+        rows = account_rows(account)
+        session = "" if kind == "cli" else session
+        result = advise(account, session, rows=rows, shares=shares_sessions, kind=kind)
+        result["targets"] = target_choices(rows, account, shares=shares_sessions, session=session)
         _ensure_watchdog(account)
     if "--json" in args:
         print(json.dumps(result, ensure_ascii=False))  # noqa: T201 - 给面板插件读的 JSON

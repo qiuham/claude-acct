@@ -50,7 +50,7 @@ cca ls                                       # 看每个号的额度
 ### 总表 cca agents
 
 ```bash
-cca agents            # 跨号会话总表：活着的 + 3 天内有活动的
+cca agents            # 跨号会话总表：活着的 + 7 天内有活动的
 cca agents --all      # 全部（含更早的已停会话）
 cca agents --json     # 结构化输出
 ```
@@ -372,6 +372,7 @@ cca plugin install --all       # 面板插件；make install 和 cca add 已经�
 - **回报**：后台派的活干完以 `<task-notification>` 自动送回（`notify: false` 就不送）；不要轮询。
 - **其它参数**：`description`（3–5 个词，横条和回报摘要用）、`model`（这个实例用哪一档）、`keep: true`（干完不退，最多闲置 30 分钟）、`include_context`（带上主会话最近的对话）。
 - 状态里 `stale: true` = 实例是 cca 升级前起的，新功能用不上，停掉重派。
+- **派活卡住**（工具一直不返回）：`kill -USR1 <cca mcp serve 的进程号>`，各线程停在哪一行会追加到 `~/.cca/mcp-stacks/<进程号>.txt`。进程号用 `ps -o pid,args --ppid <claude 进程号>` 找；只对这个功能加上之后新起的服务有效。
 
 ### 给别的会话发话
 

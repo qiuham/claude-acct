@@ -334,7 +334,7 @@ def _cli_version() -> str:
         return ""
     try:
         r = subprocess.run(  # noqa: S603 - exe 来自 shutil.which("claude")，不是外部输入
-            [exe, "--version"], capture_output=True, text=True, timeout=AGENTS_TIMEOUT,
+            [exe, "--version"], capture_output=True, text=True, timeout=AGENTS_TIMEOUT, stdin=subprocess.DEVNULL,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):

@@ -630,3 +630,31 @@ class AccountPriorityTest(unittest.TestCase):
         ranked = mcp_sideagent._by_priority(pairs)  # noqa: SLF001
         self.assertEqual([e["name"] for e in ranked], ["b004", "b001", "b005", "ds", "001"])
         self.assertEqual([e.get("priority") for e in ranked], [1, 2, 3, None, None])
+
+
+class StackDumpTest(unittest.TestCase):
+    def test_sigusr1_writes_all_thread_stacks(self):
+        """服务进程收到 SIGUSR1：各线程停在哪一行写进 ~/.cca/mcp-stacks/<进程号>.txt。"""
+        import os  # noqa: PLC0415
+        import subprocess  # noqa: PLC0415
+
+        code = (
+            "import os, signal, threading, time\n"
+            "from cca import mcp_sideagent\n"
+            "def parked():\n"
+            "    time.sleep(30)\n"
+            "threading.Thread(target=parked, daemon=True).start()\n"
+            "mcp_sideagent._register_stack_dump()\n"
+            "os.kill(os.getpid(), signal.SIGUSR1)\n"
+            "time.sleep(0.2)\n"
+            "print(os.getpid())\n"
+        )
+        with tempfile.TemporaryDirectory() as home:
+            env = {**os.environ, "HOME": home,
+                   "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+            out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
+                                 text=True, timeout=30, check=True)
+            pid = out.stdout.strip()
+            dump = (Path(home) / ".cca" / "mcp-stacks" / f"{pid}.txt").read_text(encoding="utf-8")
+        self.assertIn("parked", dump)
+        self.assertGreaterEqual(dump.count("hread 0x"), 2)   # "Current thread 0x…" 加 "Thread 0x…"

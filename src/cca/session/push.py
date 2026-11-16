@@ -135,6 +135,7 @@ def _agents_sessions(name: str, *, include_all: bool = False):
             command,
             env=build_env(name),
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=AGENTS_TIMEOUT,
             check=False,
@@ -250,7 +251,7 @@ def clear_stale_resume_job(name: str, claude_args: list) -> None:
         if exe:
             with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                 subprocess.run(  # noqa: S603
-                    [exe, "stop", job.name], capture_output=True, text=True,
+                    [exe, "stop", job.name], capture_output=True, text=True, stdin=subprocess.DEVNULL,
                     timeout=30, env={**os.environ, "CLAUDE_CONFIG_DIR": str(profile_dir(name))},
                     check=False,
                 )
@@ -936,7 +937,7 @@ def _run_claude(args: list, name: str, **options):
         kwargs["cwd"] = str(cwd)
     if capture:
         return subprocess.run(  # noqa: S603 - exe 来自 shutil.which("claude")
-            [exe, *args], capture_output=True, text=True, check=False, **kwargs,
+            [exe, *args], capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, **kwargs,
         )
     return subprocess.run([exe, *args], check=False, **kwargs)  # noqa: S603 - exe 来自 shutil.which("claude")
 

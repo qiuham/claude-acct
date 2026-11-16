@@ -2,9 +2,9 @@ import { expect, mock, test as rawTest } from 'claude-code/testing'
 import { bandMark, circleOf } from '../hooks/marks.js'
 import { agoText, sessionRow, stateLook, summaryText, takenText } from '../hooks/attach-picker.js'
 import { checkMark, columnWidths } from '../hooks/list-pane.js'
-import { ccaCompletions } from '../hooks/cca-command.js'
+import { ccaCompletions, setHandoffTargets } from '../hooks/cca-command.js'
 import { otherTasksText } from '../hooks/register.js'
-import { QUOTA_POLL_MS, parseHint, parseQuota, withHint } from '../hooks/quota-hint.js'
+import { QUOTA_POLL_MS, parseHint, parseQuota, parseTargets, withHint } from '../hooks/quota-hint.js'
 import { transcriptEvents, workflowGroups, durationText } from '../hooks/workflow-view.js'
 import { plainText } from '../hooks/text-width.js'
 import { activityOf, inboxSignalOf, waitingWhat, headerMeta, whoOf, statusText, arrowTarget, recallStep, bandLayout, compactCount, displayWidth, elapsedText, foldTasks, footerRows, taskKind, workflowCounts, progressBar } from '../hooks/register.js'
@@ -1964,6 +1964,11 @@ const CANDIDATES = [
     cwd: '/mnt/work/src/winter/llm/factor', state: 'done', running: false, last: '', taken_over: false },
 ]
 
+const QUOTA_TARGETS = { account: 'b001', warn: false, next_check_seconds: 300, targets: [
+  { profile: 'b006', five_hour: 3, seven_day: 0, roomy: true, auto: true },
+  { profile: '001', five_hour: 40, seven_day: 90, roomy: false, auto: false },
+] }
+
 async function startPicker($: any, on: any, extra?: (on: any) => void) {
   mock.clock(on)
   mock.env(on, { HOME, CLAUDE_CODE_SESSION_ID: SID })
@@ -1976,6 +1981,7 @@ async function startPicker($: any, on: any, extra?: (on: any) => void) {
   on('process.run', ($: any, e: any) => {
     ran.push([...e.argv])
     if (e.argv.includes('attach-candidates')) return { value: { exitCode: 0, stdout: JSON.stringify(CANDIDATES), stderr: '' } }
+    if (e.argv.includes('quota-hint')) return { value: { exitCode: 0, stdout: JSON.stringify(QUOTA_TARGETS), stderr: '' } }
     if (e.argv.includes('attach')) {
       return { value: { exitCode: 0, stdout: JSON.stringify({ name: '006#bg-' + e.argv[3].slice(0, 8), account: '006',
         session_id: e.argv[3], label: 'backtest', card: '挂上了 006/' + e.argv[3].slice(0, 8) + '「backtest」\n回顾：回测跑完了' }), stderr: '' } }
@@ -2181,15 +2187,39 @@ test('/cca 不带参数弹菜单：回车进挂上；不认识的子命令给出
   await $.command.run({ command: 'cca', args: '' } as any)
   expect(opened[0]).toMatchObject({ id: 'cca-menu', focus: true })
   const menu = await $.ui.mount({ ...PICKER_PANE, requestId: 'cca-menu', surface: 'terminal' } as any)
-  expect(await menu.find({ type: 'Text', text: 'attach' })).toBeDefined()
-  for (const name of ['handoff', 'watchdog']) expect(await menu.find({ type: 'Text', text: name })).toBeUndefined()
+  for (const name of ['attach', 'handoff', 'stay']) expect(await menu.find({ type: 'Text', text: name })).toBeDefined()
+  expect(await menu.find({ type: 'Text', text: 'watchdog' })).toBeUndefined()
   await menu.press({ key: 'menu-attach' })
   expect(opened.map((one) => one.id)).toContain('attach-picker')
   const answer: any = await $.command.run({ command: 'cca', args: 'nope' } as any)
   expect(String(answer?.text || '')).toContain('attach')
-  // 换号、看门狗已不在面板里
-  const gone: any = await $.command.run({ command: 'cca', args: 'handoff' } as any)
-  expect(String(gone?.text || '')).toContain('不认识的子命令')
+})
+
+test('/cca handoff 不写号弹挑选框：第一行自动，选一个号就登记换到那个号', async ($, on) => {
+  const { opened, ran } = await startPicker($, on)
+  await $.command.run({ command: 'cca', args: 'handoff' } as any)
+  expect(opened.map((one) => one.id)).toContain('cca-handoff')
+  expect(ran.some((argv) => argv.includes('quota-hint'))).toBe(true)
+  const pane = await $.ui.mount({ ...PICKER_PANE, requestId: 'cca-handoff', surface: 'terminal' } as any)
+  expect(await pane.find({ type: 'Text', text: '自动' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: '按额度挑，现在会选 b006' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: '5h 40% · 7d 90%' })).toBeDefined()
+  await pane.press({ key: 'handoff-001' })
+  const moved = ran.find((argv) => argv[1] === 'handoff')
+  expect(moved?.slice(0, 4)).toEqual(['cca', 'handoff', '001', '--current'])
+  expect(moved).toContain('--session=' + SID)
+})
+
+test('/cca handoff <号> 直接登记，不弹框；挑选框里选「自动」不带号', async ($, on) => {
+  const { opened, ran } = await startPicker($, on)
+  await $.command.run({ command: 'cca', args: 'handoff b006' } as any)
+  expect(opened.map((one) => one.id)).not.toContain('cca-handoff')
+  expect(ran.find((argv) => argv[1] === 'handoff')?.slice(0, 4)).toEqual(['cca', 'handoff', 'b006', '--current'])
+  ran.length = 0
+  await $.command.run({ command: 'cca', args: 'handoff' } as any)
+  const pane = await $.ui.mount({ ...PICKER_PANE, requestId: 'cca-handoff', surface: 'terminal' } as any)
+  await pane.press({ key: 'handoff-auto' })
+  expect(ran.find((argv) => argv[1] === 'handoff')?.slice(0, 3)).toEqual(['cca', 'handoff', '--current'])
 })
 
 test('敲 /cca a… 时补全列表给出子命令；不是 /cca 的不管', () => {
@@ -2197,6 +2227,13 @@ test('敲 /cca a… 时补全列表给出子命令；不是 /cca 的不管', () 
   expect(ccaCompletions({ text: '/cca w', cursor: 6 })).toEqual([])
   expect(ccaCompletions({ text: '/cca attach 先看', cursor: 15 })).toEqual([])
   expect(ccaCompletions({ text: '/model t', cursor: 8 })).toEqual([])
+})
+
+test('敲 /cca handoff b… 时补全能换过去的号（额度提醒那轮顺带拿到的列表）', () => {
+  setHandoffTargets(parseTargets(QUOTA_TARGETS.targets) || [])
+  expect(ccaCompletions({ text: '/cca handoff b', cursor: 14 }).map((one: any) => one.text)).toEqual(['b006'])
+  expect(ccaCompletions({ text: '/cca handoff 0', cursor: 14 })[0]).toMatchObject({ text: '001', label: '001  5h 40% · 7d 90%' })
+  expect(ccaCompletions({ text: '/cca handoff b006', cursor: 17 })).toEqual([])
 })
 
 test('前台命令（is_backgrounded: false）不当成后台任务画在底部', () => {
@@ -2359,11 +2396,14 @@ rawTest('quota hint: attached once, main thread only, never on a deny', () => {
 })
 
 rawTest('quota hint: cca decides when to ask next; junk falls back to the default', () => {
-  expect(parseQuota('{"warn":false,"next_check_seconds":60}')).toEqual({ hint: null, nextMs: 60000 })
+  expect(parseQuota('{"warn":false,"next_check_seconds":60}')).toEqual({ hint: null, nextMs: 60000, targets: null })
   expect(parseQuota('{"warn":false,"next_check_seconds":3600}').nextMs).toBe(3600000)
   expect(parseQuota('{"warn":false,"next_check_seconds":1}').nextMs).toBe(QUOTA_POLL_MS)
   expect(parseQuota('{"warn":false}').nextMs).toBe(QUOTA_POLL_MS)
-  expect(parseQuota('oops')).toEqual({ hint: null, nextMs: QUOTA_POLL_MS })
+  expect(parseQuota('oops')).toEqual({ hint: null, nextMs: QUOTA_POLL_MS, targets: null })
+  expect(parseQuota('{"targets":[{"profile":"b006","five_hour":3,"seven_day":0,"roomy":true,"auto":true},{}]}').targets)
+    .toEqual([{ profile: 'b006', five: 3, seven: 0, roomy: true, auto: true }])
+  expect(parseQuota('{"targets":[]}').targets).toEqual([])
 })
 
 

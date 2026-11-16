@@ -81,7 +81,7 @@ def agents_or_none(account: str, timeout: float = AGENTS_LIST_TIMEOUT) -> list |
     env = {**os.environ, "CLAUDE_CONFIG_DIR": str(profile_dir(account))}
     try:
         out = subprocess.run(  # noqa: S603 - 参数固定
-            [_claude(), "agents", "--json", "--all"], env=env, capture_output=True,
+            [_claude(), "agents", "--json", "--all"], env=env, capture_output=True, stdin=subprocess.DEVNULL,
             text=True, timeout=timeout, check=False)
         data = json.loads(out.stdout or "[]")
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -602,7 +602,8 @@ def _wake(row: dict) -> str:
     cwd = row["cwd"] if row["cwd"] and Path(row["cwd"]).is_dir() else None
     try:
         out = subprocess.run(  # noqa: S603 - 参数由本模块拼好
-            cmd, env=env, cwd=cwd, capture_output=True, text=True, timeout=60, check=False)
+            cmd, env=env, cwd=cwd, capture_output=True, text=True, timeout=60, check=False,
+            stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as exc:
         return f"起不来：{exc}"
     if out.returncode != 0:

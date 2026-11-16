@@ -40,6 +40,7 @@ def _run(name: str, args: list, cwd: str | None = None) -> tuple[bool, str]:
     env["CLAUDE_CONFIG_DIR"] = str(profile_dir(name))
     result = subprocess.run(  # noqa: S603 - 参数由本模块拼好
         [_claude(), *args], env=env, capture_output=True, text=True, check=False, cwd=cwd,
+        stdin=subprocess.DEVNULL,
     )
     ok = result.returncode == 0
     message = (result.stdout or result.stderr or "").strip().splitlines()

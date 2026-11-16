@@ -133,7 +133,7 @@ SUPPORTED_COUNTRIES_URL = "https://www.anthropic.com/supported-countries"
 
 AGENTS_TIMEOUT = 10
 # cca agents 默认只列活着的和这么多天内有活动的
-AGENTS_RECENT_DAYS = 3
+AGENTS_RECENT_DAYS = 7
 # live_index 并行查各号在跑的会话，最多开几个线程
 LIVE_INDEX_WORKERS = 12
 
@@ -581,7 +581,7 @@ COMMAND_USAGE = {
   每个号跑一次 claude agents，合成一张表：名字 / 编号 / 现在在哪个号 / 状态 / 在干什么 / 多久前。
   同一会话在几个号上都有记录时合成一行：以活着的为准，都没活着取最近的。
   要人处理的（blocked、等输入、撞额度）排最前，然后是在跑的，再按最近活动倒序。
-  默认只列活着的和 3 天内有活动的；--all 列全部；--json 结构化输出。取不到的号跳过，表尾提示。
+  默认只列活着的和 7 天内有活动的；--all 列全部；--json 结构化输出。取不到的号跳过，表尾提示。
   进入某条：cca <号> attach <短编号>。和 cca sessions 的区别：这里是现在的会话和状态，
   sessions 是共享池里能续的历史。
 """,

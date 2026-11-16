@@ -299,6 +299,7 @@ def run_model(model: str, prompt: str, env: dict, cwd: str) -> dict:
             "--max-turns", "1", "--output-format", "json", prompt]
     try:
         done = subprocess.run(args, capture_output=True, text=True, timeout=CALL_TIMEOUT,  # noqa: S603
+                              stdin=subprocess.DEVNULL,
                               env={**env, **extra}, cwd=cwd or None, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "error": type(exc).__name__}

@@ -24,17 +24,19 @@
 
 from __future__ import annotations
 
+import faulthandler
 import io
 import json
 import os
 import shutil
+import signal
 import sys
 import threading
 import uuid
 from contextlib import redirect_stderr
 
 from cca.errors import die, say
-from cca.paths import global_config_file
+from cca.paths import global_config_file, mcp_stack_file
 from cca.session import attach, backends, inbox, jobs, sideagent
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -204,6 +206,7 @@ def serve() -> int:
 
     protocol_out = sys.stdout
     sys.stdout = sys.stderr
+    _register_stack_dump()
     write_lock = threading.Lock()
 
     def reply(response) -> None:
@@ -236,6 +239,24 @@ def serve() -> int:
         worker.join()
     stop_sync.set()
     return 0
+
+
+def _register_stack_dump() -> None:
+    """`kill -USR1 <服务进程号>` 时把所有线程当前停在哪一行追加到 ~/.cca/mcp-stacks/<进程号>.txt。
+
+    派活偶尔卡住、又附加不到进程读线程栈时用。文件一直开着，faulthandler 在信号里直接写它的 fd。
+    """
+    path = mcp_stack_file(os.getpid())
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a", encoding="utf-8")  # 进程活多久就开多久
+        faulthandler.register(signal.SIGUSR1, file=handle, all_threads=True)
+    except (OSError, AttributeError, ValueError):
+        return
+    _STACK_FILES.append(handle)
+
+
+_STACK_FILES: list = []   # 留住文件对象，免得被回收后 fd 关掉
 
 
 def handle(request: dict) -> dict | None:

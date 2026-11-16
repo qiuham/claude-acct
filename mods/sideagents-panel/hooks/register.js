@@ -3,7 +3,7 @@ export { displayWidth }
 import { onAttachCall } from './attach-picker.js'
 import { withPeerHint } from './peer-hint.js'
 import { QUOTA_FIRST_MS, QUOTA_POLL_MS, parseQuota, withHint } from './quota-hint.js'
-import { COMMAND as CCA_COMMAND, ccaCompletions, runCca } from './cca-command.js'
+import { COMMAND as CCA_COMMAND, ccaCompletions, runCca, setHandoffTargets } from './cca-command.js'
 import { forgetList, hasList, onListArrow, onListFocus, onListMessage, renderList } from './list-pane.js'
 import { bandMark, circleOf } from './marks.js'
 import { bashTool, editTool, readTool, writeTool, taskTool, genericTool, toolOutput } from './renderers.js'
@@ -187,6 +187,7 @@ async function refreshQuotaHint($) {
       { timeoutMs: 120000 })
     const got = out && Number(out.exitCode) === 0 ? parseQuota(out.stdout) : { hint: null, nextMs: QUOTA_POLL_MS }
     quotaHint = got.hint
+    setHandoffTargets(got.targets)
     return got.nextMs
   } catch {
     quotaHint = null

@@ -81,6 +81,10 @@ def prompt_patch_cache_file() -> Path:
     """系统提示补丁的记录（改了哪几个字节、原文是什么）：含还原所需的原文。"""
     return state_dir() / "prompt-patch.json"
 
+def mcp_stack_file(pid: int) -> Path:
+    """sideagent 服务收到 SIGUSR1 时把各线程停在哪一行写到这里（排查派活卡住用）。"""
+    return state_dir() / "mcp-stacks" / f"{pid}.txt"
+
 def prompt_rules_file() -> Path:
     """自定义匹配规则的 JSON；没有就用内置的两条。"""
     return state_dir() / "prompt-rules.json"
