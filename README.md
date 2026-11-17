@@ -353,7 +353,7 @@ cca relay --model opus          # 这次用 opus 档映射的模型
 
 sideagent 是另一个号上的完整 Claude Code 会话：自己的上下文、工具和额度，干完自动把结果回报给派活的会话。
 用法照子代理（Agent / SendMessage），区别是**模型和额度由你挑**。派活、追问、挂上都在**对话里用工具**；
-什么时候派、派给谁、交办怎么写，见共享 skill `sideagent`。
+什么时候派、派给谁、交办怎么写，见共享 skill [`sideagent`](skills/sideagent)。
 
 ```bash
 cca mcp install --all          # 注册工具；cca add / login 成功后会自动注册，重启会话生效
