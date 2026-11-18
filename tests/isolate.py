@@ -36,6 +36,8 @@ def _install() -> Path:
     profile.mkdir(parents=True)
     os.environ["CLAUDE_CONFIG_DIR"] = str(profile)
     os.environ.setdefault("CCA_WATCHDOG_AUTOSTART", "0")
+    # 直接请求 /api/oauth/usage 的地方一律读这个不存在的桩文件：测试绝不联网（要测请求本身的用例自己清掉它）
+    os.environ.setdefault("CCA_OAUTH_USAGE_FILE", str(home / "no-oauth-usage.json"))
     atexit.register(shutil.rmtree, home, ignore_errors=True)
     return home
 

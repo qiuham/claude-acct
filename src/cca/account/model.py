@@ -11,7 +11,9 @@ from cca.paths import accounts_root, credentials_file, global_config_file, profi
 
 
 def valid_name(name: str) -> bool:
-    return bool(re.match(PROFILE_RE, name)) and name not in RESERVED_NAMES
+    # `<号>.lock` 是 Claude Code 刷新登录凭据时临时建的锁目录（建在配置目录旁边）：不是号。
+    # 当成号的话，cca ls 会在里面跑 claude，写进文件，锁目录就删不掉了（11-16 006/b001~b003）。
+    return bool(re.match(PROFILE_RE, name)) and name not in RESERVED_NAMES and not name.endswith(".lock")
 
 def discover_profiles() -> list:
     """~/.claude-accounts 下每个合法目录就是一个号，没有内置号。"""

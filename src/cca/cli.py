@@ -79,7 +79,7 @@ HELP_SECTIONS = (
         ("cca <号> --bg '<任务>'", "在这个号上起一个后台会话"),
     )),
     ("看", (
-        ("cca ls [--active] [--wide]", "号面板：每个号的额度（已用 % + 重置时刻）；--active 只看订阅有效的"),
+        ("cca ls [--active] [--wide]", "号面板：每个号的额度（已用 % + 重置时刻）和重置卡；--active 只看订阅有效的"),
         ("cca status [<号>]", "每个号一段摘要；带号 = 单号详情和后台会话"),
         ("cca agents [--all]", "跨号会话总表：现在每条会话在哪个号、什么状态（只看）"),
         ("cca sessions [--all]", "能续的会话（会话不绑号，任何号都能续）"),
@@ -87,6 +87,7 @@ HELP_SECTIONS = (
     )),
     ("会话与额度", (
         ("cca handoff <源号> <目标号>", "把后台会话搬到另一个号接着跑"),
+        ('cca fork <名字> --from <会话> "<交办>"', "从一条会话分出一条独立的后台会话接手一块活（会话里不用 --from，模型自己就能敲）"),
         ("cca wake <号>", "额度重置后在原号叫醒选中的会话（睡前排上）"),
         ("cca watchdog [status]", "常驻的额度看门狗：到提醒点的后台会话换号、撞墙的叫醒（自动起）"),
         ("cca quota-hint [<号>]", "额度快满时换不换、换到哪；不写号 = 现在先用哪个号"),
@@ -332,6 +333,7 @@ def main(argv=None) -> int:
         cmd_sessions,
         cmd_status,
     )
+    from cca.session.fork import cmd_fork  # noqa: PLC0415 - fork 顶部导入本模块，延迟破环
     from cca.session.push import (  # noqa: PLC0415 - push 顶部导入本模块，延迟破环
         cmd_resume_bg,
         cmd_stop_bg,
@@ -382,6 +384,7 @@ def main(argv=None) -> int:
         "resume-bg": cmd_resume_bg,
         "sessions": cmd_sessions,
         "agents": cmd_agents,
+        "fork": cmd_fork,
         "which": cmd_which,
         "set": cmd_set,
         "prompt": cmd_prompt,

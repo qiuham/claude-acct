@@ -39,6 +39,7 @@ SUBCOMMANDS = (
     "resume-bg",
     "sessions",
     "agents",
+    "fork",
     "which",
     "sync",
     "doctor",
@@ -178,22 +179,8 @@ USAGE_STALE_SECONDS = 6 * 3600
 
 USAGE_LIVE_TTL = 300          # 实时额度在缓存里放多久（秒）；--refresh 可强制刷新
 
-# `claude -p /usage` 要起一个完整的 CLI（慢账号上 10 秒以上），给足时间；
-# 之前是 3（+10=13 秒），真机上首刷四个号经常全部超时 → 面板只能端出旧数字。
-USAGE_LIVE_TIMEOUT = 20
-
-# 取额度那次 `claude -p /usage` 只要它把额度写进 .claude.json，别的启动工作都省掉（都是文档里的正式开关）：
-#   --safe-mode：不加载插件、钩子、MCP、CLAUDE.md、技能，登录照常（--bare 不行：它不读订阅登录，拿不到额度）
-#   --no-session-persistence：不存这次的对话记录，免得 /resume 里堆满 /usage
-#   ENABLE_CLAUDEAI_MCP_SERVERS=false：不去拉 claude.ai 上的 MCP 列表
-#   DISABLE_AUTOUPDATER=1：这次启动不检查自动更新
-# 不要设 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC：2.1.318 起它连额度查询也关掉，
-# /usage 正文只剩用量分析、快照也不刷新，四个号全部报"CLI 没有返回额度"（11-05 实测）。
-USAGE_CLAUDE_FLAGS = ("--safe-mode", "--no-session-persistence")
-USAGE_CLAUDE_ENV = {"ENABLE_CLAUDEAI_MCP_SERVERS": "false", "DISABLE_AUTOUPDATER": "1"}
-
 # 本地快照（claude 自己刷新的 cachedUsageUtilization）在这么久以内，就优先用它、
-# 不再起 `claude -p /usage`：快照本来就是同源数据，还省掉一次 CLI 启动。
+# 不再请求 /usage 接口：快照本来就是同源数据。
 # 和实时缓存同一个新鲜度窗口（5 分钟）：再旧的快照就不能当作"当前额度"，
 # 否则 `cca ls` 会端出二三十分钟前的数字，和会话里看到的对不上。
 SNAPSHOT_PREFER_SECONDS = USAGE_LIVE_TTL
@@ -204,6 +191,20 @@ SNAPSHOT_PREFER_SECONDS = USAGE_LIVE_TTL
 COMPACT_WINDOW_RATIO = 0.9
 
 SUBSCRIPTION_LIVE_TTL = 300
+
+# 订阅号的额度和重置卡：cca 直接请求 Claude Code 自己 /usage 用的接口（一个号不到 1 秒）。
+# cedar_ember=1 让返回体带上重置卡；skip_spend=1 不要花费明细。
+# 令牌过期或请求失败：这个号这次算没取到（显示本地快照并标出），不退回别的取法；cca 绝不调刷新接口。
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+OAUTH_USAGE_QUERY = "skip_spend=1"
+OAUTH_RESETS_QUERY = "cedar_ember=1&skip_spend=1"
+OAUTH_BETA = "oauth-2025-04-20"
+OAUTH_USAGE_TIMEOUT = 15
+# 查重置卡要令牌带这个权限；没有就只查额度
+OAUTH_PROFILE_SCOPE = "user:profile"
+
+# 重置卡在缓存里放多久（秒）；卡一天变不了几次，1 小时够新。--refresh 强制刷新
+RESETS_TTL = 3600
 
 SUBSCRIPTION_BILLING = {
     "apple_subscription": "apple",
@@ -576,6 +577,21 @@ COMMAND_USAGE = {
   agents 列表，不跑模型、不耗额度。编号和名字都不变。续上一条划掉一条，失败的留着再跑一次。
   --dry-run 只列清单。
 """,
+    "fork": """cca fork <名字> [--to <号>] [--fresh] [--from <会话>] "<交办>" —— 从当前会话分出一条独立的后台会话
+
+  主要给会话里的模型用：不写 --from 就从执行它的这条会话分，带上到此为止的完整对话，起一条叫 <名字> 的
+  新后台会话，交办作为第一句话。终端里没有「当前会话」，要写 --from <会话名字或编号>。
+  它是独立的正常会话：出现在 cca agents，额度到点由 watchdog 换号，别人按名字找它（sideagent_send {session: 名字}）。
+  交办前面自动加一段身份说明（它是谁分出来的、做完向谁回报）。和 sideagent 的区别：sideagent 是本会话名下的帮手，
+  干完回报、闲置退出；fork 适合「一块要独立负责几天的活」。
+
+  --to <号>   开在哪个号；不写就按额度挑订阅号（和自动换号同一套排序）。API 号要显式写
+  --fresh     不带对话，只带交办（来源会话很长、交办已经写全时更省）
+  --from <会话> 从哪条会话分：名字、编号前缀或完整编号（按名字找的规则和 sideagent_send 一样）
+  交办写 - 从 stdin 读（长交办用 heredoc）。同名的会话还在跑时拒绝（名字是别人找它的地址）。
+  例: cca fork planner-export --to b006 "实现规划器的 execution_value/v1 输出……"          # 会话里
+      cca fork planner-export --from portfolio-base --fresh "实现规划器的……"                  # 终端里
+""",
     "agents": """cca agents [--all] [--json] —— 跨号会话总表（只看，不进入会话）
 
   每个号跑一次 claude agents，合成一张表：名字 / 编号 / 现在在哪个号 / 状态 / 在干什么 / 多久前。
@@ -594,13 +610,22 @@ COMMAND_USAGE = {
 """,
     "status": """cca status [<profile>] [--json] —— 不带号 = 每个号一段摘要；带号 = 单号详情
 
-  目录/类型/登录/档位/额外用量/凭据与重新登录到期/额度/快照/后台会话明细；
+  目录/类型/登录/档位/额外用量/凭据与重新登录到期/额度/重置卡（每张一行：名字、张数、到期时间、能清的窗口）/快照/后台会话明细；
   API 号显示端点、模型、密钥掩码、代理，以及 settings 与清单不一致时的修复命令。
 """,
     "list": """cca ls [<号>…] [--active] [--wide] [--json] —— 号面板（cca list 同义）
 
-  一行一个号：身份 + 额度（5 小时 / 7 天，已用 % + 重置时刻）+ 档位 + 订阅。
+  一行一个号：身份 + 额度（5 小时 / 7 天，已用 % + 重置时刻）+ 重置卡 + 档位 + 订阅。
   额度默认实时取（5 分钟缓存）；--cached 只看本地快照，--refresh 强制刷新。
+  cca 直接请求 Claude Code 的 /usage 接口（一个号不到 1 秒）。没取到的号（令牌过期、限流、网络失败等）
+  显示 claude 本地快照（旧值标 ~，没有快照显示 -），表尾写明哪个号为什么没取到。cca 从不刷新令牌：令牌过期的号，
+  要等在这个号上开一次 Claude Code 会话、令牌续上后才能取到。
+  重置卡 = 现在能用的额度重置卡：`2 · 22d`（总张数 · 最早一张到期还剩多久；1～8 天写 `3d 04h`，
+  不到 1 天写 `5h 23m`；窄终端写到期日 `2 · 12-01`）、`0` 没有卡或没有领卡资格、`?` 没查到
+  （没登录、令牌过期、网络失败、令牌没有 user:profile 权限）、`-` API 号。卡和额度来自同一个请求，
+  缓存 1 小时；时间是北京时间。没资格的原因看 cca status <号> 或 --json。
+  --json 里每个号有 reset_cards：status、count、first_expires_at、eligible、ineligible_reason、
+  cards（kind、label、type、resets_left、resets_total、starts_at、ends_at、clears）；不含令牌和卡的编号。
   --wide 加 后台会话数 / 登录 / 快照时刻 / 额外用量；--json 结构化输出。
   号可以写全名或通配符：cca ls 006 gpt、cca ls 'b*'（只看 b 开头的号）。
   --active 只列订阅能用的号（有效 / 试用；状态为空的正常在用订阅也算）；API 号、未登录（登录失效）、

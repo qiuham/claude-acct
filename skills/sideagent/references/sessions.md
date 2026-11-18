@@ -1,4 +1,4 @@
-# 跨号会话：查、发话、接管、换号
+# 跨号会话：查、发话、挂上、换号
 
 SKILL.md 第 4 节的展开。号名、编号都是例子，按现查结果填。
 
@@ -14,7 +14,7 @@ SKILL.md 第 4 节的展开。号名、编号都是例子，按现查结果填�
 
 想亲眼看它在干什么（给用户的建议）：`cca <号> attach <短编号>`，退出不影响它。续一段没在跑的会话自己接着聊：`cca <号> --resume <完整编号>`。
 
-`takeover-candidates` 只列登记在某个号下的会话（`stopped` / `failed` 和 sideagent 自己的会话不列），一秒级；`taken_by` 非空说明有别的会话接管着它。`cca sessions` 要扫 transcript，第一次十几秒，之后走缓存。
+`attach-candidates` 只列登记在某个号下的会话（`stopped` / `failed` 和 sideagent 自己的会话不列），一秒级；`taken_by` 非空说明有别的会话挂上着它。`cca sessions` 要扫 transcript，第一次十几秒，之后走缓存。
 
 ## `sideagent_send {session}` 怎么选号
 
@@ -29,21 +29,21 @@ SKILL.md 第 4 节的展开。号名、编号都是例子，按现查结果填�
 - `session` 写标题时要和会话标题完全一样；写编号前缀时要能唯一对上，对上多个会报出来让你写完整编号。
 - 别人派出的 sideagent（`ds#...`）只能由派它的主会话追问，这里会拒绝。
 
-## 接管（`sideagent_takeover`）
+## 挂上（`sideagent_attach`）
 
-接管 = 把会话挂到你的面板上：它的进度和每一轮的完成通知都会送进你的会话。只在要**和它一起持续干、在面板上盯着**时用；发一句话用 `sideagent_send {session}`。
+挂上 = 把会话挂到你的面板上：它的进度和每一轮的完成通知都会送进你的会话。只在要**和它一起持续干、在面板上盯着**时用；发一句话用 `sideagent_send {session}`。
 
 ```
-sideagent_takeover {session: "<编号前缀|完整编号|标题>"}
-→ 已接管 b004/843fcef9（routine-online）… 名字 b004#bg-843fcef9
+sideagent_attach {session: "<编号前缀|完整编号|标题>"}
+→ 已挂上 b004/843fcef9（routine-online）… 名字 b004#bg-843fcef9
 sideagent_send {account: "b004#bg-843fcef9", message: "..."}
-sideagent_release {name: "b004#bg-843fcef9"}      # 不用了就放
+sideagent_detach {name: "b004#bg-843fcef9"}      # 不用了就放
 ```
 
 - 不写 `account` 时接它现在挂的号（同 `sideagent_send {session}` 的排序）。
-- 接管别人的会话前先问用户一声；一次只接要一起干的那一条，多对多能接不等于该接。
-- `sideagent_release` 只从面板拿掉，会话照跑；`sideagent_stop` / `interrupt` 对接管的会话无效，要停用 `cca <号> stop <短编号>`。
-- 不带 `session` 调 `sideagent_takeover`，装了面板的会话里会打开挑选框交给用户，你只收到「已打开挑选框」。
+- 挂上别人的会话前先问用户一声；一次只接要一起干的那一条，多对多能接不等于该接。
+- `sideagent_detach` 只从面板拿掉，会话照跑；`sideagent_stop` / `interrupt` 对挂上的会话无效，要停用 `cca <号> stop <短编号>`。
+- 不带 `session` 调 `sideagent_attach`，装了面板的会话里会打开挑选框交给用户，你只收到「已打开挑选框」。
 
 ## 卡住与收不到
 

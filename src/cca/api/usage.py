@@ -1,4 +1,4 @@
-"""订阅与用量缓存：live_subscriptions / live_usage。"""
+"""订阅与用量缓存：live_subscriptions / live_usage；重置卡缓存：cached_resets。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import concurrent.futures
 import fcntl
 import json
 import os
-import re
 import shutil
 import subprocess
 import time
@@ -15,18 +14,22 @@ from pathlib import Path
 
 from cca.account.model import read_identity
 from cca.account.store import profile_kind, read_marker
+from cca.api.oauth_usage import (
+    fetch_oauth_usage,
+    has_profile_scope,
+    oauth_block,
+    parse_resets,
+)
 from cca.config import (
+    RESETS_TTL,
     SNAPSHOT_PREFER_SECONDS,
     SUBSCRIPTION_LIVE_TTL,
-    USAGE_CLAUDE_ENV,
-    USAGE_CLAUDE_FLAGS,
-    USAGE_LIVE_TIMEOUT,
     USAGE_LIVE_TTL,
     USAGE_WINDOWS,
 )
 from cca.paths import (
-    credentials_file,
     global_config_file,
+    reset_cache_file,
     subscription_cache_file,
     usage_cache_file,
 )
@@ -101,25 +104,13 @@ def merge_cache(f: Path, updates: dict) -> None:
 def read_usage_cache() -> dict:
     return read_cache(usage_cache_file())
 
-def _oauth_block(name: str) -> dict:
-    """读凭据里的 `claudeAiOauth` 块。只在进程内用：不打印、不落盘。"""
-    f = credentials_file(name)
-    if not f.is_file():
-        return {}
-    try:
-        data = json.loads(f.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
-    return oauth if isinstance(oauth, dict) else {}
-
 def local_subscription(name: str) -> dict:
     """不联网能拿到的订阅信息：只有凭据里的套餐类型。
 
     计费方式和首订日来自平台的非公开接口；为了不自己发请求，这两项去掉了。
     """
     return {
-        "type": str(_oauth_block(name).get("subscriptionType") or ""),
+        "type": str(oauth_block(name).get("subscriptionType") or ""),
         "status": "",
         "source": "local",
     }
@@ -234,74 +225,60 @@ def profile_subscription(name: str) -> dict:
         sub.update(got)
     return sub
 
-def _usage_from_fixture(override: str, name: str) -> tuple:
-    """从测试/离线文件取该号的额度窗口；读不了或没有数据都带原因返回。"""
-    try:
-        payload = json.loads(Path(override).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return {}, f"读不了 {override}：{exc}"
-    data = payload.get(name) if isinstance(payload, dict) else None
-    if not isinstance(data, dict):
-        return {}, f"{override} 里没有 {name}"
-    windows = usage_windows(data)
-    return (windows, "") if windows else ({}, f"{override} 里没有窗口数据")
-
-_SESSION_USED = re.compile(r"Current session:\s*(\d+)%\s*used")
-_WEEK_USED = re.compile(r"Current week \(all models\):\s*(\d+)%\s*used")
+def read_reset_cache() -> dict:
+    return read_cache(reset_cache_file())
 
 
-def _usage_from_report(text: str, name: str) -> dict:
-    """从 `claude -p /usage` 的输出正文里读百分比。
+def cached_resets(name: str, now: float | None = None) -> dict | None:
+    """这个号缓存里的重置卡条目；没有或旧过 RESETS_TTL 返回 None（显示成「查不了」）。
 
-    这比 `.claude.json` 的 cachedUsageUtilization 可靠：实测那次 CLI 跑完快照
-    **没有**被重写（fetchedAtMs 还是十几分钟前的），只看快照等于没刷新。
-    重置时刻沿用快照里同一个窗口的（同一段窗口不会变）。
+    卡只在额度走 HTTP 成功时顺手写进缓存；没取到的那次不更新卡，缓存里的旧卡 1 小时内照用。
     """
-    five, week = _SESSION_USED.search(text), _WEEK_USED.search(text)
-    if not (five or week):
-        return {}
-    old = (usage_snapshot(name) or {}).get("windows") or {}
-    out = {}
-    for key, match in (("five_hour", five), ("seven_day", week)):
-        base = dict(old.get(key) or {})
-        if match:
-            base["percent"] = int(match.group(1))
-        if base:
-            out[key] = base
-    return out
+    entry = read_reset_cache().get(name)
+    now = time.time() if now is None else now
+    if not isinstance(entry, dict) or now - float(entry.get("fetched_at") or 0) >= RESETS_TTL:
+        return None
+    return entry
+
+
+def _wants_resets(name: str) -> bool:
+    """快照比缓存新、本来可以不查额度时，要不要还是查一次：令牌能查卡、没过期、卡的缓存已经旧了。"""
+    oauth = oauth_block(name)
+    expires = oauth.get("expiresAt")
+    expired = isinstance(expires, (int, float)) and expires / 1000 <= time.time()
+    return has_profile_scope(oauth) and not expired and cached_resets(name) is None
+
+
+def _usage_via_http(name: str) -> tuple:
+    """直接请求 /api/oauth/usage：`(windows, 原因)`。
+
+    令牌有 user:profile 时同一个请求带上重置卡，顺手写进 reset 缓存（不另发请求）。
+    """
+    with_resets = has_profile_scope(oauth_block(name))
+    got = fetch_oauth_usage(name, with_resets=with_resets)
+    body = got["body"]
+    if body is None:
+        return {}, got["reason"]
+    if with_resets:
+        merge_cache(reset_cache_file(), {name: parse_resets(body, time.time())})
+    windows = usage_windows(body)
+    return windows, ("" if windows else "返回里没有额度窗口")
 
 
 def fetch_usage_live(name: str) -> tuple:
-    """实时额度：跑一次 `claude -p /usage` 刷新缓存，再读 `.claude.json` 的结构化数据。
+    """实时额度：直接请求 /api/oauth/usage（一个号不到 1 秒）：`(windows, 失败原因)`。
 
-    这条路不自己请求 Anthropic：请求头、版本都由 Claude Code 自己维护。
+    令牌过期（401/403）、限流（429）、网络失败、返回体解析不了、没配代理、凭据里没有令牌，都不退回别的取法：
+    这个号这次就算"实时额度没取到"，原因照实带回，调用方显示本地快照并标出来（失败时不拿旧缓存兜底）。
+    cca 不调刷新接口（刷新会换掉刷新令牌，把这个号上正在跑的会话踢下线）：令牌过期的号，
+    要等在这个号上开一次 Claude Code 会话、令牌续上后才能取到。
+    测试/离线：`CCA_OAUTH_USAGE_FILE` 是 HTTP 那一步的桩。
     """
-    override = os.environ.get("CCA_USAGE_LIVE_FILE")   # 测试/离线：直接读文件
-    if override:
-        return _usage_from_fixture(override, name)
     marker = read_marker(name)[0] if profile_kind(name) == "api" else None
     if marker is not None:
         return {}, "API 号不查额度"
-    started = time.time()
-    result, reason = _run_claude(name, ["-p", "/usage", "--output-format", "json", *USAGE_CLAUDE_FLAGS],
-                                 timeout=USAGE_LIVE_TIMEOUT + 10, extra_env=USAGE_CLAUDE_ENV)
-    if result is None:
-        return {}, reason
-    if result.returncode != 0:
-        return {}, f"退出码 {result.returncode}"
-    try:
-        report = str(json.loads(result.stdout or "{}").get("result") or "")
-    except ValueError:
-        report = ""
-    windows = _usage_from_report(report, name)
-    if windows:
-        return windows, ""
-    # 正文里有时没有额度那几行（CLI 先打印、额度请求还在路上）。这时只认这次调用写进去的快照：
-    # 旧快照不能冒充实时值（实测：同号还开着别的会话时，它会把内存里的旧值写回 .claude.json）。
-    snapshot = usage_snapshot(name)
-    if float(snapshot.get("fetched_at") or 0) >= started and snapshot.get("windows"):
-        return snapshot["windows"], ""
-    return {}, "CLI 没有返回额度"
+    windows, why = _usage_via_http(name)
+    return (windows, "") if windows else ({}, why)
 
 
 def live_usage(names: list, *, force: bool) -> tuple:
@@ -314,15 +291,21 @@ def live_usage(names: list, *, force: bool) -> tuple:
     cache = read_usage_cache()
     now = time.time()
     result, need, failures, updates = {}, [], {}, {}
+    cards_only = set()   # 快照比缓存新、只为补重置卡才查的号：查不到就让调用方读快照，不算失败
     for name in names:
         entry = cache.get(name)
         fresh = isinstance(entry, dict) and isinstance(entry.get("windows"), dict) \
             and now - float(entry.get("fetched_at") or 0) < USAGE_LIVE_TTL
         # 本地快照（claude 自己在会话启动/结束时刷新）可能比缓存还新：这种情况直接用它，
-        # 不起 `claude -p /usage`（那个在慢账号上要十几秒，首刷还容易超时）。
+        # 不再发请求。
         snapshot_at = float((usage_snapshot(name) or {}).get("fetched_at") or 0)
         if not force and snapshot_at > float((entry or {}).get("fetched_at") or 0) \
                 and now - snapshot_at < SNAPSHOT_PREFER_SECONDS:
+            # 例外：重置卡的缓存旧了、令牌又能查卡，就补查一次（卡只从这个请求来）。
+            # 绝不把比快照旧的缓存条目放进返回值。
+            if _wants_resets(name):
+                need.append(name)
+                cards_only.add(name)
             continue
         if fresh and not force:
             result[name] = {"windows": entry["windows"], "fetched_at": entry["fetched_at"],
@@ -340,7 +323,7 @@ def live_usage(names: list, *, force: bool) -> tuple:
                 if windows:
                     result[name] = {"windows": windows, "fetched_at": now, "source": "live"}
                     updates[name] = {"windows": windows, "fetched_at": now}
-                elif why:
+                elif why and name not in cards_only:   # 只补卡的号失败了：调用方照旧读快照，不算失败
                     failures[name] = why
     merge_cache(usage_cache_file(), updates)
     return result, failures

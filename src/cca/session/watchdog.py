@@ -746,7 +746,7 @@ def snapshot(now: float | None = None, *, fresh: bool = False) -> tuple:
 
 
 def plan_round(now: float | None = None, *, fresh: bool = False) -> list[Decision]:
-    """这一轮要干什么（不改任何东西）。fresh=False 时只用缓存的额度，不触发 `claude -p /usage` 现取。"""
+    """这一轮要干什么（不改任何东西）。fresh=False 时只用缓存的额度，不触发 /usage 接口现取。"""
     return snapshot(now, fresh=fresh)[0]
 
 

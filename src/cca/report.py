@@ -26,7 +26,9 @@ from cca.account.store import (
     read_marker,
 )
 from cca.api.client import api_display
+from cca.api.oauth_usage import active_cards, has_profile_scope, oauth_block
 from cca.api.usage import (
+    cached_resets,
     live_subscriptions,
     live_usage,
     local_subscription,
@@ -52,6 +54,7 @@ from cca.config import (
     USAGE_COLUMNS,
     USAGE_LIVE_TTL,
     USAGE_STALE_SECONDS,
+    USAGE_WINDOWS,
     WIDE_CONSOLE_WIDTH,
 )
 from cca.env import DISPLAY_TZ
@@ -377,6 +380,7 @@ def status_payload(name: str) -> dict:
             die(error)
     row = _profile_row(name)
     row["subscription"] = profile_subscription(name)
+    row["reset_cards"] = reset_cards_payload(name, row["kind"])
     sessions = active_workers(name)
     return {"profile": name, **row, "background": {**row["background"], "sessions": sessions}}
 
@@ -481,6 +485,7 @@ def _add_oauth_status_rows(grid, row: dict, name: str, sessions: list) -> None:
     _add_extra_usage_row(grid, row)
     _add_credential_rows(grid, name)
     grid.add_row("额度", _plain(usage_line(row["usage"], with_snapshot=False)))
+    grid.add_row("重置卡", _plain(reset_detail_text(reset_cards_payload(name, row["kind"]))))
     grid.add_row(
         "快照",
         _plain(
@@ -511,12 +516,140 @@ def render_status(name: str, *, as_json: bool = False) -> None:
         _add_oauth_status_rows(grid, row, name, sessions)
     console.print(grid)
 
+# ---- 重置卡（额度重置卡）：和额度同一个请求取，cca ls 一列、cca status 几行 ----------------
+
+_CLEAR_LABELS = dict(USAGE_WINDOWS)
+
+
+def card_kind(card: dict) -> str:
+    """卡的种类：有 label 用 label，否则把清哪些窗口翻成中文（five_hour → 5 小时），再不行用 type。"""
+    if card.get("label"):
+        return str(card["label"])
+    clears = [_CLEAR_LABELS.get(str(c), str(c)) for c in card.get("clears") or []]
+    return " + ".join(clears) or str(card.get("type") or "-")
+
+
+def _iso(ts):
+    """epoch 秒 → 北京时间 ISO 串（--json 用）；没有返回 None。"""
+    return datetime.fromtimestamp(float(ts), _DISPLAY_ZONE).isoformat(timespec="seconds") if ts else None
+
+
+def _card_payload(card: dict) -> dict:
+    """一张卡的输出：种类、张数、生效/到期时间和清哪些窗口；没有卡的编号。"""
+    return {
+        "kind": card_kind(card),
+        "label": card.get("label") or "",
+        "type": card.get("type") or "",
+        "resets_left": card.get("resets_left"),
+        "resets_total": card.get("resets_total"),
+        "starts_at": _iso(card.get("starts_at")),
+        "ends_at": _iso(card.get("ends_at")),
+        "clears": list(card.get("clears") or []),
+    }
+
+
+def _reset_unknown_reason(name: str, kind: str) -> str:
+    """查不了卡的原因：API 号、没登录、令牌没有 user:profile、1 小时内没查成功。"""
+    if kind == "api":
+        return "API 号没有重置卡"
+    if not credentials_file(name).is_file():
+        return "没登录"
+    if not has_profile_scope(oauth_block(name)):
+        return "令牌没有 user:profile 权限，查不了重置卡"
+    return "1 小时内没有查成功（令牌过期、限流或网络失败）"
+
+
+def reset_cards_payload(name: str, kind: str, now: float | None = None) -> dict:
+    """一个号的重置卡（`cca ls --json` 的 reset_cards、`cca status`）。
+
+    status：cards = 有能用的卡；none = 没有卡；ineligible = 没资格；unknown = 查不了（reason 说原因）。
+    只算现在能用的卡（已生效、没到期、还剩张数）。不含令牌，也不含卡的编号。
+    """
+    now = time.time() if now is None else now
+    entry = cached_resets(name, now) if kind != "api" else None
+    if entry is None:
+        return {"status": "unknown", "reason": _reset_unknown_reason(name, kind), "count": None,
+                "first_expires_at": None, "eligible": None, "ineligible_reason": "", "fetched_at": None,
+                "cards": []}
+    cards = active_cards(entry, now)
+    count = sum(int(c.get("resets_left") or 0) for c in cards)
+    ends = [float(c["ends_at"]) for c in cards if c.get("ends_at")]
+    eligible = entry.get("eligible")
+    status = "cards" if count else ("ineligible" if eligible is False else "none")
+    return {"status": status, "count": count, "first_expires_at": _iso(min(ends)) if ends else None,
+            "eligible": eligible, "ineligible_reason": str(entry.get("ineligible_reason") or ""),
+            "fetched_at": _iso(entry.get("fetched_at")), "cards": [_card_payload(c) for c in cards]}
+
+
+# 重置卡剩余时间：8 天以上只写天（额度列不会出现这么长的剩余时间）
+CARD_DAYS_ONLY = 8
+# ineligible_reason 的简短中文说明（原文照写，后面括号里给说明；没收录的只写原文）
+INELIGIBLE_REASONS = {"tenure": "开通时间不够", "not_max_plan": "不是 Max 套餐"}
+
+
+def card_remaining(seconds) -> str:
+    """重置卡到期还剩多久：`22d`（8 天以上）、`3d 04h`、`5h 23m`；写法同额度列，去掉对齐用的空格。"""
+    days = max(0, int(seconds)) // (SECONDS_PER_MINUTE * MINUTES_PER_HOUR * HOURS_PER_DAY)
+    if days >= CARD_DAYS_ONLY:
+        return f"{days}d"
+    return format_remaining(seconds).strip()
+
+
+def reset_cell_text(info: dict, *, is_api: bool = False, countdown: bool = True):
+    """ls 的「重置卡」一格：`2 · 22d`（张数 · 最早一张还剩多久）、窄表 `2 · 12-01`、`0`、`?`、`-`。
+
+    格子里不放中文：没卡和没资格都是 `0`（没资格的原因在 cca status 和 --json 里）。
+    """
+    status = info.get("status")
+    if is_api:
+        return _plain("-", style="dim")
+    if status == "cards":
+        first = info.get("first_expires_at")
+        when = "-"
+        if first:
+            stamp = datetime.fromisoformat(first)
+            when = card_remaining(stamp.timestamp() - time.time()) if countdown else f"{stamp:%m-%d}"
+        return _plain(f"{info['count']} · {when}", style="bold green")
+    if status in ("none", "ineligible"):
+        return _plain("0", style="dim")
+    return _plain("?", style="dim")
+
+
+def _card_when(ends) -> str:
+    """到期时间：北京时间 `MM-DD HH:MM`，不在今年的带年份 `YYYY-MM-DD HH:MM`。"""
+    if not ends:
+        return "不过期"
+    stamp = datetime.fromisoformat(ends)
+    fmt = "%m-%d %H:%M" if stamp.year == datetime.now(_DISPLAY_ZONE).year else "%Y-%m-%d %H:%M"
+    return f"{stamp.strftime(fmt)} 到期"
+
+
+def reset_detail_text(info: dict) -> str:
+    """cca status 的「重置卡」：每张卡一行（名字、剩几次、到期时间、能清的窗口）。"""
+    status = info.get("status")
+    if status == "unknown":
+        return f"?（没查到：{info.get('reason') or '原因不明'}）"
+    if status == "ineligible":
+        reason = info.get("ineligible_reason") or ""
+        note = INELIGIBLE_REASONS.get(reason)
+        why = f"{reason}（{note}）" if note else (reason or "原因没给")
+        return f"0（没资格：{why}）"
+    if status == "none":
+        return "0"
+    lines = [f"共 {info['count']} 张"]
+    for card in info["cards"]:
+        name = card.get("label") or card.get("type") or "-"
+        clears = " + ".join(_CLEAR_LABELS.get(str(c), str(c)) for c in card.get("clears") or []) or "-"
+        lines.append(f"{name} ×{card['resets_left']} · {_card_when(card.get('ends_at'))} · 清 {clears}")
+    return "\n".join(lines)
+
+
 _LIST_HEADERS = {
-    "five": USAGE_COLUMNS[0][1], "seven": USAGE_COLUMNS[1][1], "bg": "后台",
+    "five": USAGE_COLUMNS[0][1], "seven": USAGE_COLUMNS[1][1], "resets": "重置卡", "bg": "后台",
     "tier": "档位", "substate": "订阅",
     "login": "登录", "snap": "快照", "extra": "额外",
 }
-_LIST_ORDER = ("five", "seven", "bg", "tier", "substate", "login", "snap", "extra")
+_LIST_ORDER = ("five", "seven", "resets", "bg", "tier", "substate", "login", "snap", "extra")
 
 
 def _list_options(args: list) -> tuple:
@@ -609,7 +742,8 @@ def _fetch_list_rows(names: list, targets: list, *, refresh: bool) -> list:
     """并发取每行的本地信息、实时额度、订阅信息；失败一律降级，不拖垮面板。"""
     live, subs = {}, {}
     if refresh:
-        sys.stderr.write("正在取实时额度（每号起一次 claude /usage，最多约 30 秒；--cached 可跳过）\n")
+        sys.stderr.write("正在取实时额度（直接请求 /usage 接口，一个号不到 1 秒；没取到的号显示本地快照并标出；"
+                         "--cached 可跳过）\n")
     workers = min(16, max(4, len(names) + len(targets)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         row_futures = {name: pool.submit(_profile_row, name) for name in names}
@@ -647,6 +781,8 @@ def _fetch_list_rows(names: list, targets: list, *, refresh: bool) -> list:
             row["usage"]["source"] = "snapshot"
         if live_failures.get(name):
             row["usage"]["live_error"] = str(live_failures[name])
+        # 重置卡在额度那次请求里顺手写进了缓存：这里只读缓存，不另发请求
+        row["reset_cards"] = reset_cards_payload(name, row["kind"])
     return rows
 
 def list_rows(names: list, *, cached_only: bool = False, refresh: bool = False) -> list:
@@ -677,6 +813,8 @@ def _list_cells(row: dict, *, wide: bool, countdown: bool = True) -> tuple:
         cells[("five", "seven")[idx]] = usage_cell_text(
             window, binding=bool(window) and window["percent"] == roominess,
             stale=not _usage_value_is_fresh(snap), countdown=countdown)
+    cells["resets"] = reset_cell_text(row.get("reset_cards") or {}, is_api=row["kind"] == "api",
+                                      countdown=countdown)
     if wide:
         # 后台会话数只在 --wide 里给：它不是"该用哪个号"的判断依据，
         # 默认视图放它只会挤掉档位和订阅。明细用 cca status <profile>。
@@ -718,7 +856,7 @@ def _collect_list_cells(rows: list, *, wide: bool, countdown: bool = True) -> di
     """把每行的单元格与表尾需要提示的事一起收集起来。"""
     stale, extra_on, missing_key, body = [], [], [], []
     cached_only, live_failed = [], []
-    reset_seen = False
+    reset_seen = reset_unclear = resets_shown = False
     for row in rows:
         snap = row["usage"]
         if snap["fetched_at"] and time.time() - snap["fetched_at"] > USAGE_STALE_SECONDS:
@@ -735,10 +873,14 @@ def _collect_list_cells(rows: list, *, wide: bool, countdown: bool = True) -> di
             missing_key.append(row["profile"])
         cells, reset = _list_cells(row, wide=wide, countdown=countdown)
         reset_seen = reset_seen or reset
+        resets_shown = resets_shown or row["kind"] != "api"
+        reset_unclear = reset_unclear or (row["kind"] != "api" and (row.get("reset_cards") or {}).get(
+            "status") == "unknown")
         body.append(cells)
     api_rows = [row for row in rows if row["kind"] == "api"]
     return {"body": body, "stale": stale, "extra_on": extra_on, "missing_key": missing_key,
-            "reset_seen": reset_seen, "api_rows": api_rows, "wide": wide,
+            "reset_seen": reset_seen, "reset_unclear": reset_unclear, "resets_shown": resets_shown,
+            "api_rows": api_rows, "wide": wide, "countdown": countdown,
             "cached_only": cached_only, "live_failed": live_failed}
 
 def _column_width(key: str, body: list) -> int:
@@ -776,14 +918,17 @@ def _needed_width(fixed: dict, keys: list, *, with_email: bool = False, email_wi
     return sum(widths) + len(widths) - 1
 
 def _fit_list_columns(cols: list, fixed: dict, width: int) -> tuple:
-    """按"邮箱先省略 → 订阅 → 档位"的顺序让位，绝不裁列。"""
+    """按"邮箱先省略 → 重置卡 → 订阅 → 档位"的顺序让位，绝不裁列。
+
+    重置卡是新加的列，比原有的订阅、档位先让位：窄终端上原有的列照旧显示。
+    """
     include_email = False
     while True:
         fit_email = _needed_width(fixed, cols, with_email=True, email_width=EMAIL_MIN_WIDTH) <= width
         if _needed_width(fixed, cols, with_email=fit_email, email_width=EMAIL_MIN_WIDTH) <= width:
             include_email = fit_email
             break
-        drop = next((k for k in ("substate", "tier") if k in cols), None)
+        drop = next((k for k in ("resets", "substate", "tier") if k in cols), None)
         if drop is None:
             include_email = fit_email
             break
@@ -819,11 +964,16 @@ def _print_list_notes(console, data: dict) -> None:
             style="dim",
         )
     )
+    if data.get("resets_shown"):
+        unclear = "；? = 没查到" if data.get("reset_unclear") else ""
+        # 窄表时格子写的是最早一张的到期日（和额度列只显示时刻一致），说明跟着换
+        tail = "最早一张还剩多久" if data.get("countdown", True) else "最早一张的到期日"
+        console.print(_plain(f"重置卡 = 张数 · {tail}{unclear}；明细看 cca status <号>", style="dim"))
     if data["reset_seen"]:
         console.print(_plain("* = 重置时刻已过，百分比是重置前的旧值（claude 下次启动会刷新）", style="dim"))
     if data.get("live_failed"):
         console.print(_plain(
-            f"实时额度没取到: {', '.join(data['live_failed'])}（显示的是较新的缓存/本地快照）",
+            f"实时额度没取到: {', '.join(data['live_failed'])}（显示的是 claude 本地快照，旧值标 ~；没有快照显示 -）",
             style="yellow"))
     if data.get("cached_only"):
         console.print(_plain(
@@ -850,6 +1000,8 @@ def _render_list_table(rows: list, data: dict, console) -> None:
     fixed = _list_fixed_widths(rows, body)
     cols = [k for k in _LIST_ORDER if body and k in body[0]]
     cols, include_email, email_width = _fit_list_columns(cols, fixed, console.width)
+    # 重置卡列让位省掉了，说明行也不打（表尾说明只在需要时才打）
+    data["resets_shown"] = data.get("resets_shown") and "resets" in cols
     table = _build_list_table(cols, fixed, email_width, with_email=include_email)
     for row, cells in zip(rows, body, strict=True):
         head = [_plain(row["profile"])]
@@ -1151,3 +1303,4 @@ def cmd_agents(args: list) -> int:
         return 0
     _render_agents(view, make_console(), show_all=show_all)
     return 0
+

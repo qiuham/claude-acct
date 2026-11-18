@@ -312,8 +312,8 @@ class CliTest(unittest.TestCase):
             "CCA_AUTO_PLUGIN": "0",      # 建号时不自动装面板（那会真跑一次 claude）
             "CCA_WATCHDOG_AUTOSTART": "0",   # 不真的拉起换号常驻进程
             # 额度/订阅默认用不存在的 fixture：走本地快照，不起 claude、不联网
-            "CCA_USAGE_LIVE_FILE": str(self.home / "no-usage.json"),
             "CCA_SUBSCRIPTION_LIVE_FILE": str(self.home / "no-sub.json"),
+            "CCA_OAUTH_USAGE_FILE": str(self.home / "no-oauth-usage.json"),
             "FAKE_CLAUDE_OUT": str(self.home / "claude-call.json"),
             "FAKE_CLAUDE_LOG": str(self.home / "claude-calls.log"),
             "FAKE_CLAUDE_CWD_LOG": str(self.home / "claude-cwd.log"),
@@ -2089,7 +2089,7 @@ class CliTest(unittest.TestCase):
         return f
 
     def usage_live_fixture(self, values):
-        """`{号: (5小时, 7天)}` → 实时额度的桩文件（CCA_USAGE_LIVE_FILE）。"""
+        """`{号: (5小时, 7天)}` → 实时额度的桩文件（CCA_OAUTH_USAGE_FILE）。"""
         path = self.home / "usage-live.json"
         path.write_text(json.dumps({
             name: {"five_hour": {"utilization": five, "resets_at": None},
@@ -2508,7 +2508,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("~", r.stdout)
 
     def test_ls_skips_claude_when_snapshot_is_fresh(self):
-        """本地快照比缓存新时，不去起 `claude -p /usage` —— 首刷那十几秒就是它造成的。
+        """本地快照比缓存新时，不再请求 /usage 接口（原来起 claude 时，首刷那十几秒就是它造成的）。
 
         真机：`cca ls` 第一次四个号全部 "claude 超时"（13 秒一刀切），面板只能端出旧数字。
         """
@@ -2521,13 +2521,13 @@ class CliTest(unittest.TestCase):
             "seven_day": {"label": "7 天", "percent": 80, "resets_at": None, "reset_passed": False},
         }, "fetched_at": time.time() - 3600}}), encoding="utf-8")   # 缓存：一小时前
         fixture = self.usage_live_fixture({"002": (99, 98)})        # 若真去取，会看到 99/98
-        r = self.run_cli("ls", CCA_USAGE_LIVE_FILE=str(fixture))
+        r = self.run_cli("ls", CCA_OAUTH_USAGE_FILE=str(fixture))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("42%", r.stdout)          # 用快照（更新）
         self.assertNotIn("98%", r.stdout)
 
     def test_ls_refreshes_when_snapshot_is_old(self):
-        """快照超过新鲜窗口（5 分钟）就不再当"当前额度"：起一次 /usage 取实时。
+        """快照超过新鲜窗口（5 分钟）就不再当"当前额度"：请求一次 /usage 接口取实时。
 
         真机：快照是 claude 在会话启动/结束时刷的，闲置的号能停在二三十分钟前；
         原来的 30 分钟窗口让 `cca ls` 一直端旧数字，和会话里看到的对不上。
@@ -2541,7 +2541,7 @@ class CliTest(unittest.TestCase):
             "seven_day": {"label": "7 天", "percent": 55, "resets_at": None, "reset_passed": False},
         }, "fetched_at": time.time() - 3600}}), encoding="utf-8")   # 缓存：一小时前
         fixture = self.usage_live_fixture({"002": (99, 98)})
-        r = self.run_cli("ls", CCA_USAGE_LIVE_FILE=str(fixture))
+        r = self.run_cli("ls", CCA_OAUTH_USAGE_FILE=str(fixture))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("99%", r.stdout)          # 用了实时值
         self.assertIn("98%", r.stdout)
@@ -2561,7 +2561,7 @@ class CliTest(unittest.TestCase):
             "five_hour": {"label": "5 小时", "percent": 65, "resets_at": None, "reset_passed": False},
             "seven_day": {"label": "7 天", "percent": 79, "resets_at": None, "reset_passed": False},
         }, "fetched_at": time.time() - 60}}), encoding="utf-8")        # 缓存：1 分钟前（新鲜，但比快照旧）
-        r = self.run_cli("ls", CCA_USAGE_LIVE_FILE=str(fixture))
+        r = self.run_cli("ls", CCA_OAUTH_USAGE_FILE=str(fixture))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("100%", r.stdout)          # 用快照（更新）
         self.assertNotIn("79%", r.stdout)        # `~` 的规则见 test_ls_tilde_* 两条
@@ -2571,7 +2571,7 @@ class CliTest(unittest.TestCase):
         self.run_cli("new", "002")
         self.seed_credentials("002")
         self.seed_usage("002", five=10, seven=20)
-        r = self.run_cli("ls", CCA_USAGE_LIVE_FILE=str(self.home / "nope.json"))
+        r = self.run_cli("ls", CCA_OAUTH_USAGE_FILE=str(self.home / "nope.json"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("实时额度没取到", r.stdout)
         self.assertIn("002", r.stdout)
@@ -2582,7 +2582,7 @@ class CliTest(unittest.TestCase):
         self.seed_credentials("002")
         self.seed_usage("002", five=88, seven=77, age_minutes=60)   # 快照旧了，才需要实时取
         fixture = self.usage_live_fixture({"002": (12, 34)})
-        r = self.run_cli("ls", CCA_USAGE_LIVE_FILE=str(fixture))
+        r = self.run_cli("ls", CCA_OAUTH_USAGE_FILE=str(fixture))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("12%", r.stdout)
         self.assertIn("34%", r.stdout)
@@ -2596,12 +2596,12 @@ class CliTest(unittest.TestCase):
         self.seed_credentials("002")
         self.seed_usage("002", five=88, seven=77, age_minutes=60)   # 快照旧了，才需要实时取
         fixture = self.usage_live_fixture({"002": (12, 34)})
-        self.run_cli("ls", CCA_USAGE_LIVE_FILE=str(fixture))
+        self.run_cli("ls", CCA_OAUTH_USAGE_FILE=str(fixture))
         self.usage_live_fixture({"002": (99, 98)})        # 数值变了，但缓存还新鲜
-        r = self.run_cli("ls", CCA_USAGE_LIVE_FILE=str(fixture))
+        r = self.run_cli("ls", CCA_OAUTH_USAGE_FILE=str(fixture))
         self.assertIn("12%", r.stdout)
         self.assertNotIn("99%", r.stdout)
-        r = self.run_cli("ls", "--refresh", CCA_USAGE_LIVE_FILE=str(fixture))
+        r = self.run_cli("ls", "--refresh", CCA_OAUTH_USAGE_FILE=str(fixture))
         self.assertIn("99%", r.stdout)
 
     def test_ls_cached_flag_skips_network(self):
@@ -2610,7 +2610,7 @@ class CliTest(unittest.TestCase):
         self.seed_credentials("002")
         self.seed_usage("002", five=88, seven=77)
         fixture = self.usage_live_fixture({"002": (12, 34)})
-        r = self.run_cli("ls", "--cached", CCA_USAGE_LIVE_FILE=str(fixture))
+        r = self.run_cli("ls", "--cached", CCA_OAUTH_USAGE_FILE=str(fixture))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("88%", r.stdout)
         self.assertNotIn("12%", r.stdout)
@@ -2621,7 +2621,7 @@ class CliTest(unittest.TestCase):
         self.run_cli("new", "002")
         self.seed_credentials("002")
         self.seed_usage("002", five=88, seven=77)
-        r = self.run_cli("ls", CCA_USAGE_LIVE_FILE=str(self.home / "nope.json"))
+        r = self.run_cli("ls", CCA_OAUTH_USAGE_FILE=str(self.home / "nope.json"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("88%", r.stdout)
 
@@ -2647,7 +2647,7 @@ class CliTest(unittest.TestCase):
         (self.acct_dir("002") / ".credentials.json").write_text(json.dumps(creds), encoding="utf-8")
         r = self.run_cli("ls", "--json",
                          CCA_SUBSCRIPTION_LIVE_FILE=str(self.home / "nope.json"),
-                         CCA_USAGE_LIVE_FILE=str(self.usage_live_fixture({"002": (1, 2)})))
+                         CCA_OAUTH_USAGE_FILE=str(self.usage_live_fixture({"002": (1, 2)})))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         sub = next(x for x in json.loads(r.stdout)["profiles"] if x["profile"] == "002")["subscription"]
         self.assertEqual(sub["type"], "max")
@@ -2665,7 +2665,7 @@ class CliTest(unittest.TestCase):
         }})
         r = self.run_cli("ls", "--wide",
                          CCA_SUBSCRIPTION_LIVE_FILE=str(fixture),
-                         CCA_USAGE_LIVE_FILE=str(self.usage_live_fixture({"002": (1, 2)})))
+                         CCA_OAUTH_USAGE_FILE=str(self.usage_live_fixture({"002": (1, 2)})))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         # 计费和首订日已去掉：只剩档位和订阅状态
         self.assertIn("max 5x", r.stdout)
@@ -2685,7 +2685,7 @@ class CliTest(unittest.TestCase):
         })
         usage = self.usage_live_fixture(dict.fromkeys(("002", "003", "004", "005"), (1, 2)))
         r = self.run_cli("ls", "--active", "--json", CCA_SUBSCRIPTION_LIVE_FILE=str(fixture),
-                         CCA_USAGE_LIVE_FILE=str(usage))
+                         CCA_OAUTH_USAGE_FILE=str(usage))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         data = json.loads(r.stdout)
         shown = {p["profile"] for p in data["profiles"]}
@@ -2697,9 +2697,9 @@ class CliTest(unittest.TestCase):
         # 没有凭据的号：未登录，不管缓存里几天前写的是什么
         self.run_cli("new", "007")
         r = self.run_cli("ls", "--active", "--json", CCA_SUBSCRIPTION_LIVE_FILE=str(fixture),
-                         CCA_USAGE_LIVE_FILE=str(usage))
+                         CCA_OAUTH_USAGE_FILE=str(usage))
         self.assertIn("007", json.loads(r.stdout)["hidden"]["未登录"])
-        r = self.run_cli("ls", "--active", CCA_SUBSCRIPTION_LIVE_FILE=str(fixture), CCA_USAGE_LIVE_FILE=str(usage))
+        r = self.run_cli("ls", "--active", CCA_SUBSCRIPTION_LIVE_FILE=str(fixture), CCA_OAUTH_USAGE_FILE=str(usage))
         self.assertIn("--active 藏起来的", r.stdout)
         self.assertNotIn("\n004 ", r.stdout)
 
@@ -2715,7 +2715,7 @@ class CliTest(unittest.TestCase):
         }})
         r = self.run_cli("ls", "--json",
                          CCA_SUBSCRIPTION_LIVE_FILE=str(fixture),
-                         CCA_USAGE_LIVE_FILE=str(self.usage_live_fixture({"002": (1, 2)})))
+                         CCA_OAUTH_USAGE_FILE=str(self.usage_live_fixture({"002": (1, 2)})))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         sub = next(x for x in json.loads(r.stdout)["profiles"] if x["profile"] == "002")["subscription"]
         self.assertEqual(sub["source"], "live")
@@ -2780,13 +2780,13 @@ class CliTest(unittest.TestCase):
                           "resets_at": (now + timedelta(days=3, hours=4)).isoformat()},
         }}), encoding="utf-8")
         for args in (["ls"], ["ls", "--wide"]):
-            r = self.run_cli(*args, CCA_USAGE_LIVE_FILE=str(path))
+            r = self.run_cli(*args, CCA_OAUTH_USAGE_FILE=str(path))
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             # 绝对时刻和倒计时都在；12/13 分之差随执行耗时，正则放宽。
             self.assertRegex(r.stdout, r"40%[~*]? \d{2}-\d{2} \d{2}:\d{2} ·\s+2h 1[23]m")
             self.assertRegex(r.stdout, r"·\s+3d 0[0-9]h")
         # 窄终端放不下两个值，退回只给时刻（不然 Rich 会裁列）。
-        narrow = self.run_cli("ls", COLUMNS="60", CCA_USAGE_LIVE_FILE=str(path))
+        narrow = self.run_cli("ls", COLUMNS="60", CCA_OAUTH_USAGE_FILE=str(path))
         self.assertEqual(narrow.returncode, 0, narrow.stderr)
         self.assertNotRegex(narrow.stdout, r"\d{2}:\d{2} · ")
 

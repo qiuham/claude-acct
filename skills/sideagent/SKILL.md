@@ -3,9 +3,9 @@ name: sideagent
 description: >-
   sideagent（cca）：把一件完整的活交给另一个号、另一家模型的独立会话（模型和额度自己挑；自带 Agent
   只能用 Claude、只花本号额度），也负责给别的会话发话——不管它在哪个号、是不是已经 done / stopped。
-  Use when 准备把工作单元交出去（调研、实现、审查、验证、长期负责都算）；要多路并行或不同家族的独立判断；
+  Use when 准备把工作单元交出去（调研、实现、审查、验证、长期负责都算），或要 fork / 分出一条独立会话负责一块活；要多路并行或不同家族的独立判断；
   本号额度快用完、收到【cca 额度提醒】；要给别的会话发话，或某条会话在 ListAgents 里没有、SendMessage 发不到、被说成
-  「下线 / 不在了 / 没上线」；用户提到 sideagent、某个号名或模型家族（gemini、deepseek、gpt）、takeover、
+  「下线 / 不在了 / 没上线」；用户提到 sideagent、某个号名或模型家族（gemini、deepseek、gpt）、attach（takeover）、
   handoff；收到 sideagent 的 <task-notification>；sideagent 卡住、blocked、一直不回；工具缺失、没回报。
   几步工具调用能做完、或严重依赖本会话默会上下文的，不要起 sideagent。
 ---
@@ -14,7 +14,7 @@ description: >-
 
 sideagent 是 cca 在另一个号上起的完整 Claude Code 会话：自己的上下文、工具、skill 和额度，干完自动把结果回报给派活的会话。用法照子代理（Agent / SendMessage），区别是**模型和额度由你挑**。
 
-工具来自 cca 的 MCP 服务 `sideagents`：`sideagent_accounts`、`sideagent_send`、`sideagent_result`、`sideagent_status`、`sideagent_interrupt`、`sideagent_stop`、`sideagent_takeover`、`sideagent_release`。参数以工具自带说明为准，这里只写说明里没有的判断。
+工具来自 cca 的 MCP 服务 `sideagents`：`sideagent_accounts`、`sideagent_send`、`sideagent_result`、`sideagent_status`、`sideagent_interrupt`、`sideagent_stop`、`sideagent_attach`、`sideagent_detach`。参数以工具自带说明为准，这里只写说明里没有的判断。
 
 ## 1. 什么时候派、派给谁
 
@@ -38,7 +38,7 @@ sideagent 是 cca 在另一个号上起的完整 Claude Code 会话：自己的�
 | 量大、机械、要快：读日志和长文档、批量改、初稿 | 便宜的 api 家族（DeepSeek 这类）或 `haiku` 档；能拆就多开几个 |
 | 要独立视角：审 diff / 方案、核实关键结论 | `family` 和主会话不同的号，`opus` 档 |
 | 要 Claude 的推理，只是想并行 | 自带 Agent；本号紧张换一个有额度的订阅号；订阅号都满用 `family: Claude` 的 api 号 |
-| 长期盯一条线 | 额度稳、`running` 少的号，`keep: true` 或建一条正常会话让它自己负责 |
+| 长期盯一条线、一块要独立负责几天的活 | 不派 sideagent，用 `cca fork` 分出一条独立会话（见第 4 节末） |
 
 - **用户点名就照办**：说了号、家族或要独立视角，再小的活也派；没点名时才考虑「自己做更快」。
 - **要用订阅号时，先用周额度最早重置的**（`priority` 小的）：它剩下的周额度到点就作废，晚重置的号留着不会跑。两个窗口任一用满就派不出去；api 号是真钱，订阅号有额度时优先用。
@@ -104,14 +104,29 @@ cca 跨号找到它现在挂的号，没在跑就唤醒（那个号额度满了�
 - 只想知道它在不在、在哪个号：只读查，报 `号 / 编号 / 状态`，别认领别人的职责：
 
   ```bash
-  cca sideagent takeover-candidates --all \
+  cca sideagent attach-candidates --all \
     | jq -r '.[] | [.account, .id, .name, .state, .running] | @tsv' | grep -i <标题或编号>
   cca sessions --wide | grep -i <标题>      # 已退出的历史会话；--all 不限 14 天
   ```
 
 - 发话会唤醒没在跑的会话、烧它那个号的额度（api 号是真钱）：确实需要它做事时再发。
-- `sideagent_takeover` 只在要**持续在面板上看它**时用（进度会一直进你的上下文）；用完 `sideagent_release`。
-- `sideagent_send` 回「要给 account 和 message」= 这个会话起得早，MCP 还是旧版：请用户重启会话；急的话先 `sideagent_takeover` → `sideagent_send {account: <返回的名字>}` → `sideagent_release`。
+- `sideagent_attach` 只在要**持续在面板上看它**时用（进度会一直进你的上下文）；用完 `sideagent_detach`。
+- `sideagent_send` 回「要给 account 和 message」= 这个会话起得早，MCP 还是旧版：请用户重启会话；急的话先 `sideagent_attach` → `sideagent_send {account: <返回的名字>}` → `sideagent_detach`。
+
+### 分出一条独立会话：`cca fork`
+
+一块要独立负责好几天的活（实现一个模块、长期负责一条线），别自己硬扛、也别等用户去终端开会话——自己分出去：
+
+```bash
+cca fork <名字> - <<'TASK'
+你是 <名字>，负责……（目标、可检查的验收、写入范围、仓库与 MR 规则、结果报给谁）
+TASK
+```
+
+- 新会话带着本会话到此为止的完整对话，名字就是别人找它的地址（`sideagent_send {session: "<名字>"}`）；出现在 `cca agents`，额度到点由 watchdog 换号。交办前 cca 自动加一段身份说明（谁分出来的、向谁回报）。
+- 不写 `--to` 按额度挑订阅号；要别家模型写 `--to gpt` 这类。本会话已经很长、交办写全了：加 `--fresh` 只带交办，省掉新号上重读整段上下文。
+- 和 sideagent 的分工：sideagent 是你名下的帮手（干完回报、闲置退出、进度进你的面板）；fork 出来的和你平级、独立跑，你只在它回报时处理。
+- 分完告诉用户：新会话的名字、在哪个号、交给它的是什么。
 
 换号（`cca handoff`）、额度撞墙（`watchdog` / `wake`）、`blocked`、误唤醒副本的补救，见 `references/sessions.md`。
 
@@ -129,6 +144,6 @@ cca 跨号找到它现在挂的号，没在跑就唤醒（那个号额度满了�
 
 ## 6. 加载工具与排障
 
-工具通常延迟加载，用 ToolSearch 按关键词找：`sideagent_send sideagent_result sideagent_status sideagent_accounts sideagent_takeover`。找不到 = 这个号没注册：请用户 `cca mcp install --all` 后**重启会话**（新建的号会自动注册）。
+工具通常延迟加载，用 ToolSearch 按关键词找：`sideagent_send sideagent_result sideagent_status sideagent_accounts sideagent_attach`。找不到 = 这个号没注册：请用户 `cca mcp install --all` 后**重启会话**（新建的号会自动注册）。
 
 想知道它在干什么：`sideagent_status` 的 `doing`，或面板横条。没回报、`stale`、Gemini 的 `400 tool_use.signature` 等见 `references/troubleshooting.md`；机制见 cca 仓库 `platform/claude-acct` 的 README「sideagent」一节和 `docs/internals.md`。

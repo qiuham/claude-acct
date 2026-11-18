@@ -95,6 +95,10 @@ def usage_cache_file() -> Path:
 def subscription_cache_file() -> Path:
     return accounts_root() / "_subscription-cache.json"
 
+def reset_cache_file() -> Path:
+    """重置卡缓存（每号一条：卡的种类、张数、生效和到期时间）；不存令牌，也不存卡的编号。"""
+    return accounts_root() / "_reset-cache.json"
+
 def waiting_file() -> Path:
     return accounts_root() / "waiting.json"
 

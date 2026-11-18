@@ -25,5 +25,5 @@ cp -r /tmp/claude-acct/skills/sideagent "$HOME/.claude/skills/sideagent"
 sideagent 的行为以 cca 仓库为准。cca 改了工具参数、状态或排障路径时，同步检查 `SKILL.md` 第 3–5 节和 `references/`；参数细节留在工具自带说明里，不要抄进来。
 
 - `SKILL.md`：什么时候派、派给谁、并行、交办、给别的会话发话的硬规则。保持短：它在触发时整份进上下文。
-- `references/sessions.md`：跨号会话的查法、选号规则、接管、换号与额度撞墙。
+- `references/sessions.md`：跨号会话的查法、选号规则、挂上、换号与额度撞墙。
 - `references/troubleshooting.md`：按现象排障。

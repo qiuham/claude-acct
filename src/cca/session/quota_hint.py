@@ -32,7 +32,7 @@ THRESHOLD_ENV = {"five_hour": "CCA_QUOTA_HINT_PERCENT", "seven_day": "CCA_QUOTA_
 WINDOWS = ("five_hour", "seven_day")
 # 远的时候按 cca ls 的缓存规则（5 分钟），插件 5 分钟问一次就够：从 80% 涨到 95% 一般要几十分钟。
 # 离阈值 15 个百分点以内查得勤一点：2 分钟一问、当前号的额度超过 2 分钟才现取，最坏落后约 4 分钟。
-# 现取（起一次 claude -p /usage）按号共享：同一个号不管开着几个会话，2 分钟最多取一次。
+# 现取（请求一次 /usage 接口）按号共享：同一个号不管开着几个会话，2 分钟最多取一次。
 NEAR_MARGIN = 15
 # 同一个号上的会话一起到提醒点、一起换号时，分散到这么多个余量充足的号上（按周额度重置先后取前几个），
 # 免得一窝蜂搬到同一个号、把它的 5 小时窗口几十分钟就打满、再集体搬一次。
@@ -288,7 +288,7 @@ def _slot_path(account: str) -> Path:
 
 @contextlib.contextmanager
 def _refresh_slot(account: str):
-    """同一个号同一时间只让一个会话去现取额度（起一次 claude -p /usage）；拿不到锁就用缓存。"""
+    """同一个号同一时间只让一个会话去现取额度（请求一次 /usage 接口）；拿不到锁就用缓存。"""
     path = _slot_path(account)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
